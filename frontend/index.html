@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SignBridge — Hand Tracking</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0a0a0f;
+      color: #d4d4d8;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      color: #a1a1aa;
+      margin-bottom: 1.5rem;
+    }
+
+    h1 span {
+      color: #e4e4e7;
+      font-weight: 600;
+    }
+
+    .video-wrap {
+      position: relative;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #111118;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.06);
+    }
+
+    video, canvas {
+      display: block;
+      width: 640px;
+      height: 480px;
+    }
+
+    video {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    canvas {
+      position: relative;
+      z-index: 1;
+    }
+
+    #status {
+      margin-top: 1rem;
+      font-size: 0.8rem;
+      color: #52525b;
+      transition: color 0.3s;
+    }
+
+    #status.active {
+      color: #4ade80;
+    }
+
+    #coords {
+      margin-top: 1.25rem;
+      width: 640px;
+      max-height: 220px;
+      overflow-y: auto;
+      background: #111118;
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.7rem;
+      line-height: 1.6;
+      color: #71717a;
+      white-space: pre;
+    }
+
+    @media (max-width: 680px) {
+      video, canvas, #coords { width: 100%; height: auto; }
+    }
+  </style>
+</head>
+<body>
+
+  <h1><span>SignBridge</span> · Hand Tracking</h1>
+
+  <div class="video-wrap">
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <p id="status">Initializing…</p>
+  <pre id="coords">Waiting for hand data…</pre>
+
+  <!-- MediaPipe Vision + Drawing -->
+  <script type="module">
+    import { HandLandmarker, FilesetResolver, DrawingUtils } from
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs";
+
+    const video   = document.getElementById("webcam");
+    const canvas  = document.getElementById("overlay");
+    const ctx     = canvas.getContext("2d");
+    const status  = document.getElementById("status");
+    const coords  = document.getElementById("coords");
+
+    // Landmark names for logging
+    const LANDMARK_NAMES = [
+      "WRIST",
+      "THUMB_CMC","THUMB_MCP","THUMB_IP","THUMB_TIP",
+      "INDEX_MCP","INDEX_PIP","INDEX_DIP","INDEX_TIP",
+      "MIDDLE_MCP","MIDDLE_PIP","MIDDLE_DIP","MIDDLE_TIP",
+      "RING_MCP","RING_PIP","RING_DIP","RING_TIP",
+      "PINKY_MCP","PINKY_PIP","PINKY_DIP","PINKY_TIP"
+    ];
+
+    let handLandmarker;
+    let drawingUtils;
+    let lastTimestamp = -1;
+
+    // ── Bootstrap ──────────────────────────────────────────────
+    async function init() {
+      status.textContent = "Loading model…";
+
+      const filesetResolver = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm"
+      );
+
+      handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        numHands: 2,
+        minHandDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+
+      drawingUtils = new DrawingUtils(ctx);
+      status.textContent = "Requesting camera…";
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: "user" },
+      });
+
+      video.srcObject = stream;
+      video.addEventListener("loadeddata", () => {
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+        status.textContent = "Tracking";
+        status.classList.add("active");
+        detect();
+      });
+    }
+
+    // ── Detection loop ─────────────────────────────────────────
+    function detect() {
+      const now = performance.now();
+      if (now === lastTimestamp) {
+        requestAnimationFrame(detect);
+        return;
+      }
+      lastTimestamp = now;
+
+      const results = handLandmarker.detectForVideo(video, now);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (results.landmarks && results.landmarks.length > 0) {
+        // Draw each hand
+        for (const landmarks of results.landmarks) {
+          drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
+            color: "#3b82f6",
+            lineWidth: 2,
+          });
+          drawingUtils.drawLandmarks(landmarks, {
+            color: "#e4e4e7",
+            lineWidth: 1,
+            radius: 3,
+          });
+        }
+
+        // Build coordinate text
+        let text = "";
+        results.landmarks.forEach((hand, hi) => {
+          const label = results.handednesses[hi]?.[0]?.categoryName ?? `Hand ${hi}`;
+          text += `── ${label} ──\n`;
+          hand.forEach((pt, i) => {
+            text += `${LANDMARK_NAMES[i].padEnd(12)} x:${pt.x.toFixed(3)}  y:${pt.y.toFixed(3)}  z:${pt.z.toFixed(3)}\n`;
+          });
+          text += "\n";
+        });
+        coords.textContent = text.trimEnd();
+      } else {
+        coords.textContent = "No hands detected";
+      }
+
+      requestAnimationFrame(detect);
+    }
+
+    init().catch((err) => {
+      status.textContent = `Error: ${err.message}`;
+      console.error(err);
+    });
+  </script>
+</body>
+</html>
