@@ -1,216 +1,269 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SignBridge — Hand Tracking</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-
-    body {
-      background: #0a0a0f;
-      color: #d4d4d8;
-      font-family: 'Inter', system-ui, -apple-system, sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      min-height: 100vh;
-      padding: 2rem 1rem;
-    }
-
-    h1 {
-      font-size: 1.25rem;
-      font-weight: 500;
-      letter-spacing: 0.04em;
-      color: #a1a1aa;
-      margin-bottom: 1.5rem;
-    }
-
-    h1 span {
-      color: #e4e4e7;
-      font-weight: 600;
-    }
-
-    .video-wrap {
-      position: relative;
-      border-radius: 12px;
-      overflow: hidden;
-      background: #111118;
-      box-shadow: 0 0 0 1px rgba(255,255,255,0.06);
-    }
-
-    video, canvas {
-      display: block;
-      width: 640px;
-      height: 480px;
-    }
-
-    video {
-      position: absolute;
-      top: 0;
-      left: 0;
-    }
-
-    canvas {
-      position: relative;
-      z-index: 1;
-    }
-
-    #status {
-      margin-top: 1rem;
-      font-size: 0.8rem;
-      color: #52525b;
-      transition: color 0.3s;
-    }
-
-    #status.active {
-      color: #4ade80;
-    }
-
-    #coords {
-      margin-top: 1.25rem;
-      width: 640px;
-      max-height: 220px;
-      overflow-y: auto;
-      background: #111118;
-      border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 8px;
-      padding: 0.75rem 1rem;
-      font-family: 'SF Mono', 'Fira Code', monospace;
-      font-size: 0.7rem;
-      line-height: 1.6;
-      color: #71717a;
-      white-space: pre;
-    }
-
-    @media (max-width: 680px) {
-      video, canvas, #coords { width: 100%; height: auto; }
-    }
-  </style>
-</head>
-<body>
-
-  <h1><span>SignBridge</span> · Hand Tracking</h1>
-
-  <div class="video-wrap">
-    <video id="webcam" autoplay playsinline></video>
-    <canvas id="overlay"></canvas>
-  </div>
-
-  <p id="status">Initializing…</p>
-  <pre id="coords">Waiting for hand data…</pre>
-
-  <!-- MediaPipe Vision + Drawing -->
-  <script type="module">
-    import { HandLandmarker, FilesetResolver, DrawingUtils } from
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs";
-
-    const video   = document.getElementById("webcam");
-    const canvas  = document.getElementById("overlay");
-    const ctx     = canvas.getContext("2d");
-    const status  = document.getElementById("status");
-    const coords  = document.getElementById("coords");
-
-    // Landmark names for logging
-    const LANDMARK_NAMES = [
-      "WRIST",
-      "THUMB_CMC","THUMB_MCP","THUMB_IP","THUMB_TIP",
-      "INDEX_MCP","INDEX_PIP","INDEX_DIP","INDEX_TIP",
-      "MIDDLE_MCP","MIDDLE_PIP","MIDDLE_DIP","MIDDLE_TIP",
-      "RING_MCP","RING_PIP","RING_DIP","RING_TIP",
-      "PINKY_MCP","PINKY_PIP","PINKY_DIP","PINKY_TIP"
-    ];
-
-    let handLandmarker;
-    let drawingUtils;
-    let lastTimestamp = -1;
-
-    // ── Bootstrap ──────────────────────────────────────────────
-    async function init() {
-      status.textContent = "Loading model…";
-
-      const filesetResolver = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm"
-      );
-
-      handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-          delegate: "GPU",
-        },
-        runningMode: "VIDEO",
-        numHands: 2,
-        minHandDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5,
-      });
-
-      drawingUtils = new DrawingUtils(ctx);
-      status.textContent = "Requesting camera…";
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: "user" },
-      });
-
-      video.srcObject = stream;
-      video.addEventListener("loadeddata", () => {
-        canvas.width  = video.videoWidth;
-        canvas.height = video.videoHeight;
-        status.textContent = "Tracking";
-        status.classList.add("active");
-        detect();
-      });
-    }
-
-    // ── Detection loop ─────────────────────────────────────────
-    function detect() {
-      const now = performance.now();
-      if (now === lastTimestamp) {
-        requestAnimationFrame(detect);
-        return;
-      }
-      lastTimestamp = now;
-
-      const results = handLandmarker.detectForVideo(video, now);
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      if (results.landmarks && results.landmarks.length > 0) {
-        // Draw each hand
-        for (const landmarks of results.landmarks) {
-          drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
-            color: "#3b82f6",
-            lineWidth: 2,
-          });
-          drawingUtils.drawLandmarks(landmarks, {
-            color: "#e4e4e7",
-            lineWidth: 1,
-            radius: 3,
-          });
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project Signbridge | Vision is Our Bridge</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700;800&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #fdf7eb;
+            /* Warm cream background */
+            color: #1a1a1a;
+            /* Deep charcoal */
+            overflow-x: hidden;
         }
 
-        // Build coordinate text
-        let text = "";
-        results.landmarks.forEach((hand, hi) => {
-          const label = results.handednesses[hi]?.[0]?.categoryName ?? `Hand ${hi}`;
-          text += `── ${label} ──\n`;
-          hand.forEach((pt, i) => {
-            text += `${LANDMARK_NAMES[i].padEnd(12)} x:${pt.x.toFixed(3)}  y:${pt.y.toFixed(3)}  z:${pt.z.toFixed(3)}\n`;
-          });
-          text += "\n";
-        });
-        coords.textContent = text.trimEnd();
-      } else {
-        coords.textContent = "No hands detected";
-      }
+        .hero-text-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
 
-      requestAnimationFrame(detect);
-    }
+        .hero-title-top {
+            font-size: clamp(4rem, 12vw, 10rem);
+            font-weight: 800;
+            line-height: 0.85;
+            letter-spacing: -0.04em;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 0.2em;
+        }
 
-    init().catch((err) => {
-      status.textContent = `Error: ${err.message}`;
-      console.error(err);
-    });
-  </script>
+        .hero-title-bottom {
+            font-size: clamp(4rem, 12vw, 10rem);
+            font-weight: 800;
+            line-height: 0.85;
+            letter-spacing: -0.04em;
+            margin-top: -0.1em;
+        }
+
+        .is-text {
+            font-family: 'Inter', sans-serif;
+            font-weight: 300;
+            font-style: italic;
+            font-size: clamp(2rem, 6vw, 4.5rem);
+            margin-top: -0.1em;
+            opacity: 0.9;
+        }
+
+        .oval-video-container {
+            width: clamp(180px, 30vw, 450px);
+            aspect-ratio: 1.8 / 1;
+            background: #e5e7eb;
+            border-radius: 999px;
+            overflow: hidden;
+            position: relative;
+            display: inline-flex;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.1);
+            z-index: 10;
+        }
+
+        .ai-node {
+            position: absolute;
+            width: 6px;
+            height: 6px;
+            background: #2ecc71;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #2ecc71;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                transform: scale(1);
+                opacity: 0.8;
+            }
+
+            50% {
+                transform: scale(1.5);
+                opacity: 0.4;
+            }
+        }
+
+        .nav-link {
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            transition: opacity 0.2s;
+        }
+
+        .nav-link:hover {
+            opacity: 0.6;
+        }
+
+        .btn-primary {
+            background-color: #2ecc71;
+            color: white;
+            padding: 1rem 2.5rem;
+            border-radius: 999px;
+            font-weight: 700;
+            transition: transform 0.2s, background-color 0.2s;
+        }
+
+        .btn-primary:hover {
+            background-color: #27ae60;
+            transform: scale(1.05);
+        }
+
+        .logo-bar span {
+            font-size: 0.65rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+        }
+
+        @keyframes textFlyIn {
+            0% { opacity: 0; transform: scale(3) translateY(-20px); filter: blur(15px); }
+            100% { opacity: 1; transform: scale(1) translateY(0); filter: blur(0); }
+        }
+
+        @keyframes expandOval {
+            0% { opacity: 0; transform: scale(0); filter: blur(10px); }
+            100% { opacity: 1; transform: scale(1); filter: blur(0); }
+        }
+
+        .animate-fade-up {
+            animation: textFlyIn 1.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+            opacity: 0;
+            will-change: transform, opacity, filter;
+            transform-origin: center center;
+        }
+
+        .animate-oval {
+            animation: expandOval 1.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+            opacity: 0;
+            will-change: transform, opacity, filter;
+            transform-origin: center center;
+            display: inline-flex;
+        }
+
+        .delay-100 { animation-delay: 0.1s; }
+        .delay-200 { animation-delay: 0.2s; }
+        .delay-300 { animation-delay: 0.3s; }
+        .delay-400 { animation-delay: 0.4s; }
+        .delay-500 { animation-delay: 0.6s; }
+    </style>
+</head>
+
+<body class="min-h-screen flex flex-col">
+
+    <!-- Navigation -->
+    <nav class="flex items-center justify-between px-8 py-8 md:px-16 animate-fade-up">
+        <div class="flex items-center gap-2">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 12C4 12 7 8 12 8C17 8 20 12 20 12" stroke="currentColor" stroke-width="2.5"
+                    stroke-linecap="round" />
+                <circle cx="7" cy="14" r="2" fill="currentColor" />
+                <circle cx="17" cy="14" r="2" fill="currentColor" />
+            </svg>
+            <span class="font-extrabold text-sm tracking-tighter">PROJECT SIGNBRIDGE</span>
+        </div>
+
+        <div class="hidden md:flex items-center gap-10">
+            <a href="technology.html" class="nav-link">TECHNOLOGY</a>
+            <a href="methodology.html" class="nav-link">METHODOLOGY</a>
+            <a href="demo.html" class="nav-link">DEMO</a>
+            <a href="team.html" class="nav-link">TEAM</a>
+        </div>
+
+        <div class="flex items-center gap-4">
+            <button class="p-2 border border-black/10 rounded-full">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path
+                        d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z">
+                    </path>
+                </svg>
+            </button>
+            <a href="#"
+                class="text-xs font-bold border border-black/10 px-6 py-2.5 rounded-full hover:bg-black hover:text-white transition-all">VIEW
+                REPO</a>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <main class="flex-grow flex flex-col items-center justify-center px-6 text-center pt-10 pb-20">
+        <div class="hero-text-container">
+            <!-- Row 1: Vision + Video -->
+            <div class="hero-title-top animate-fade-up delay-100">
+                <span>Vision</span>
+                <div class="oval-video-container animate-oval delay-200 mx-2">
+                    <div class="ai-node" style="top: 35%; left: 45%;"></div>
+                    <div class="ai-node" style="top: 50%; left: 65%;"></div>
+                    <div class="ai-node" style="top: 65%; left: 40%;"></div>
+                    <img src="https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?auto=format&fit=crop&q=80&w=800"
+                        alt="Vision" class="w-full h-full object-cover">
+                    <div class="absolute inset-0 flex items-center justify-center">
+                        <span
+                            class="text-[8px] font-bold text-white bg-green-500/90 px-2 py-0.5 rounded tracking-widest uppercase shadow-lg shadow-green-500/20">LIVE
+                            DATA</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Row 2: is Our -->
+            <div class="is-text animate-fade-up delay-200">
+                is Our
+            </div>
+
+            <!-- Row 3: Bridge -->
+            <div class="hero-title-bottom animate-fade-up delay-300">
+                <span>Bridge</span>
+            </div>
+        </div>
+
+        <!-- Call to Actions -->
+        <div class="mt-14 flex flex-col md:flex-row items-center gap-8 animate-fade-up delay-400">
+            <a href="demo.html" class="btn-primary" style="text-decoration:none;">TRY LIVE DEMO</a>
+            <a href="methodology.html"
+                class="flex items-center gap-2 text-sm font-bold opacity-80 hover:opacity-100 transition-opacity">
+                OUR METHODOLOGY
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="7" y1="17" x2="17" y2="7"></line>
+                    <polyline points="7 7 17 7 17 17"></polyline>
+                </svg>
+            </a>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="px-8 md:px-16 py-12 border-t border-black/5 animate-fade-up delay-500">
+        <div class="flex flex-col md:flex-row items-center justify-between gap-8 logo-bar">
+            <div class="flex items-center gap-2 opacity-60">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                </svg>
+                <span class="uppercase">SECURE DATA</span>
+            </div>
+
+            <div class="flex flex-wrap justify-center items-center gap-12 grayscale opacity-40">
+                <span class="font-black">HACKATHON_2024</span>
+                <span class="font-serif italic text-lg">DeepMind</span>
+                <span class="font-bold tracking-tighter">MEDIA<span class="font-light">PIPE</span></span>
+                <span class="font-mono">PYTORCH</span>
+            </div>
+
+            <div class="flex items-center gap-4 opacity-60">
+                <span class="uppercase">SCROLL DOWN</span>
+                <div class="w-8 h-8 rounded-full border border-black flex items-center justify-center">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M7 13l5 5 5-5M7 6l5 5 5-5" />
+                    </svg>
+                </div>
+            </div>
+        </div>
+    </footer>
+
 </body>
+
 </html>

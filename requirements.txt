@@ -1,3 +1,6 @@
+tqdm
 mediapipe==0.10.14
 opencv-python
 numpy<2
+ai-edge-litert
+protobuf==4.25.3

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Our Team | Project Signbridge</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700;800&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #fdf7eb; color: #1a1a1a; overflow-x: hidden; }
+        .nav-link { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em; transition: opacity 0.2s; }
+        .nav-link:hover { opacity: 0.6; }
+        .btn-primary { background-color: #2ecc71; color: white; padding: 1rem 2.5rem; border-radius: 999px; font-weight: 700; transition: transform 0.2s, background-color 0.2s; }
+        .btn-primary:hover { background-color: #27ae60; transform: scale(1.05); }
+        .logo-bar span { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.1em; }
+        .content-card { background: white; border-radius: 1.5rem; padding: 2.5rem; box-shadow: 0 10px 40px rgba(0,0,0,0.03); border: 1px solid rgba(0,0,0,0.05); margin-bottom: 2rem; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <!-- Navigation -->
+    <nav class="flex items-center justify-between px-8 py-8 md:px-16">
+        <a href="index.html" class="flex items-center gap-2 hover:opacity-80 transition-opacity">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 12C4 12 7 8 12 8C17 8 20 12 20 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+                <circle cx="7" cy="14" r="2" fill="currentColor" />
+                <circle cx="17" cy="14" r="2" fill="currentColor" />
+            </svg>
+            <span class="font-extrabold text-sm tracking-tighter">PROJECT SIGNBRIDGE</span>
+        </a>
+        <div class="hidden md:flex items-center gap-10">
+            <a href="technology.html" class="nav-link">TECHNOLOGY</a>
+            <a href="methodology.html" class="nav-link">METHODOLOGY</a>
+            <a href="demo.html" class="nav-link">DEMO</a>
+            <a href="team.html" class="nav-link text-black">TEAM</a>
+        </div>
+        <div class="flex items-center gap-4">
+            <button class="p-2 border border-black/10 rounded-full"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg></button>
+            <a href="#" class="text-xs font-bold border border-black/10 px-6 py-2.5 rounded-full hover:bg-black hover:text-white transition-all">VIEW REPO</a>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="flex-grow flex flex-col items-center px-6 pt-10 pb-20 w-full max-w-4xl mx-auto">
+        <h1 class="text-5xl md:text-6xl font-extrabold mb-12 tracking-tight text-center">Our Team</h1>
+        
+        <div class="w-full">
+            <div class="content-card">
+                <h2 class="text-2xl font-bold mb-6 tracking-tight">About Us</h2>
+                <div class="grid md:grid-cols-2 gap-8 mb-8">
+                    <div class="bg-black/5 rounded-2xl p-6 border border-black/5">
+                        <div class="w-16 h-16 rounded-full bg-black flex justify-center items-center text-white font-bold text-2xl mb-4">Kr</div>
+                        <h3 class="text-xl font-bold mb-1">Krish Bharadiya</h3>
+                        <p class="text-[0.8rem] font-bold text-black/60 uppercase tracking-widest mb-4">AI Team Lead</p>
+                        <p class="text-sm text-black/80 leading-relaxed mb-3">AI Team Lead for the Prosper Engineering robotics team.</p>
+                        <p class="text-sm text-black/70 leading-relaxed">Proficient in Python, Java, machine learning, and AI API integration. Previously developed an award-winning AI software for asteroid detection.</p>
+                    </div>
+                    <div class="bg-black/5 rounded-2xl p-6 border border-black/5">
+                        <div class="w-16 h-16 rounded-full bg-black flex justify-center items-center text-white font-bold text-2xl mb-4">Ku</div>
+                        <h3 class="text-xl font-bold mb-1">Kush Bharadiya</h3>
+                        <p class="text-[0.8rem] font-bold text-black/60 uppercase tracking-widest mb-4">Software & ML Engineer</p>
+                        <p class="text-sm text-black/80 leading-relaxed mb-3">Possesses expertise in Python, JavaScript, and machine learning.</p>
+                        <p class="text-sm text-black/70 leading-relaxed">Has worked on an application for yield savings and a science fair initiative using AI for disease detection.</p>
+                    </div>
+                </div>
+
+                <h2 class="text-2xl font-bold mb-6 tracking-tight border-t border-black/5 pt-8">Guiding Principles</h2>
+                <div class="grid gap-6 text-black/80">
+                    <div class="flex items-start gap-4">
+                        <div class="w-10 h-10 rounded-full bg-[#2ecc71]/20 text-[#27ae60] flex items-center justify-center font-bold shrink-0">1</div>
+                        <div>
+                            <h4 class="font-bold text-black text-lg">Zero-Friction Accessibility</h4>
+                            <p class="text-sm mt-1">The app must work instantly on standard devices.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start gap-4">
+                        <div class="w-10 h-10 rounded-full bg-[#3498db]/20 text-[#2980b9] flex items-center justify-center font-bold shrink-0">2</div>
+                        <div>
+                            <h4 class="font-bold text-black text-lg">Speed Over Complexity</h4>
+                            <p class="text-sm mt-1">Collaborative generation of creative solutions.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start gap-4">
+                        <div class="w-10 h-10 rounded-full bg-[#9b59b6]/20 text-[#8e44ad] flex items-center justify-center font-bold shrink-0">3</div>
+                        <div>
+                            <h4 class="font-bold text-black text-lg">Privacy by Design</h4>
+                            <p class="text-sm mt-1">No actual video frames are saved or sent; only mathematical hand coordinates are transmitted.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start gap-4">
+                        <div class="w-10 h-10 rounded-full bg-[#e67e22]/20 text-[#d35400] flex items-center justify-center font-bold shrink-0">4</div>
+                        <div>
+                            <h4 class="font-bold text-black text-lg">Accuracy Over Scale</h4>
+                            <p class="text-sm mt-1">Prioritizing 98% accuracy on 26 static letters over 50% accuracy on 100 dynamic words.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="px-8 md:px-16 py-12 border-t border-black/5">
+        <div class="flex flex-col md:flex-row items-center justify-between gap-8 logo-bar">
+            <div class="flex items-center gap-2 opacity-60">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                <span class="uppercase">SECURE DATA</span>
+            </div>
+            <div class="flex flex-wrap justify-center items-center gap-12 grayscale opacity-40">
+                <span class="font-black">HACKATHON_2024</span>
+                <span class="font-serif italic text-lg">DeepMind</span>
+                <span class="font-bold tracking-tighter">MEDIA<span class="font-light">PIPE</span></span>
+                <span class="font-mono">PYTORCH</span>
+            </div>
+            <div class="flex items-center gap-4 opacity-60">
+                <span class="uppercase">SCROLL DOWN</span>
+                <div class="w-8 h-8 rounded-full border border-black flex items-center justify-center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M7 13l5 5 5-5M7 6l5 5 5-5"/></svg></div>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

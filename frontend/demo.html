@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Demo | Project Signbridge</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700;800&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #fdf7eb; color: #1a1a1a; overflow-x: hidden; }
+        .nav-link { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em; transition: opacity 0.2s; }
+        .nav-link:hover { opacity: 0.6; }
+        .btn-primary { background-color: #2ecc71; color: white; padding: 1rem 2.5rem; border-radius: 999px; font-weight: 700; transition: transform 0.2s, background-color 0.2s; }
+        .btn-primary:hover { background-color: #27ae60; transform: scale(1.05); }
+        .logo-bar span { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.1em; }
+        .content-card { background: white; border-radius: 1.5rem; padding: 2.5rem; box-shadow: 0 10px 40px rgba(0,0,0,0.03); border: 1px solid rgba(0,0,0,0.05); margin-bottom: 2rem; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <!-- Navigation -->
+    <nav class="flex items-center justify-between px-8 py-8 md:px-16">
+        <a href="index.html" class="flex items-center gap-2 hover:opacity-80 transition-opacity">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 12C4 12 7 8 12 8C17 8 20 12 20 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+                <circle cx="7" cy="14" r="2" fill="currentColor" />
+                <circle cx="17" cy="14" r="2" fill="currentColor" />
+            </svg>
+            <span class="font-extrabold text-sm tracking-tighter">PROJECT SIGNBRIDGE</span>
+        </a>
+        <div class="hidden md:flex items-center gap-10">
+            <a href="technology.html" class="nav-link">TECHNOLOGY</a>
+            <a href="methodology.html" class="nav-link">METHODOLOGY</a>
+            <a href="demo.html" class="nav-link text-black">DEMO</a>
+            <a href="team.html" class="nav-link">TEAM</a>
+        </div>
+        <div class="flex items-center gap-4">
+            <button class="p-2 border border-black/10 rounded-full"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg></button>
+            <a href="#" class="text-xs font-bold border border-black/10 px-6 py-2.5 rounded-full hover:bg-black hover:text-white transition-all">VIEW REPO</a>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="flex-grow flex flex-col items-center px-6 pt-10 pb-20 w-full max-w-6xl mx-auto">
+        <h1 class="text-5xl md:text-6xl font-extrabold mb-4 tracking-tight text-center">Live Demo</h1>
+        <p class="text-lg text-black/60 mb-12 text-center max-w-2xl">Experience real-time hand tracking directly in your browser. Ensure your webcam is enabled and hold your hand up to the camera.</p>
+        
+        <div class="w-full flex flex-col lg:flex-row gap-8 items-stretch">
+            <div class="w-full lg:w-2/3 content-card !p-2 !mb-0 relative bg-black flex justify-center items-center shadow-2xl">
+                <!-- Video Container -->
+                <div class="relative w-full h-full rounded-2xl overflow-hidden" style="aspect-ratio: 4/3;">
+                    <video id="webcam" autoplay playsinline class="absolute inset-0 w-full h-full object-cover transform -scale-x-100"></video>
+                    <canvas id="overlay" class="absolute inset-0 w-full h-full object-cover z-10 transform -scale-x-100"></canvas>
+                </div>
+            </div>
+            
+            <div class="w-full lg:w-1/3 content-card flex flex-col !mb-0 h-auto">
+                <h3 class="text-xl font-bold mb-4 tracking-tight flex justify-between items-center pb-4 border-b border-black/5">
+                    Live Data
+                    <span id="status" class="text-xs py-1.5 px-3 rounded-full bg-black/5 text-black font-semibold transition-colors duration-300">Initializing...</span>
+                </h3>
+                <div class="flex-grow bg-[#1a1a1a] rounded-xl p-4 overflow-y-auto w-full relative" style="min-height: 400px; max-height: 600px;">
+                    <div class="absolute top-0 right-0 p-3 flex gap-2">
+                        <div class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
+                    </div>
+                    <pre id="coords" class="text-[0.65rem] text-[#2ecc71] font-mono leading-relaxed whitespace-pre-wrap break-words">Waiting for camera access...</pre>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="px-8 md:px-16 py-12 border-t border-black/5 mt-10">
+        <div class="flex flex-col md:flex-row items-center justify-between gap-8 logo-bar">
+            <div class="flex items-center gap-2 opacity-60">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                <span class="uppercase">SECURE DATA</span>
+            </div>
+            <div class="flex flex-wrap justify-center items-center gap-12 grayscale opacity-40">
+                <span class="font-black">HACKATHON_2024</span>
+                <span class="font-serif italic text-lg">DeepMind</span>
+                <span class="font-bold tracking-tighter">MEDIA<span class="font-light">PIPE</span></span>
+                <span class="font-mono">PYTORCH</span>
+            </div>
+            <div class="flex items-center gap-4 opacity-60">
+                <span class="uppercase">SCROLL DOWN</span>
+                <div class="w-8 h-8 rounded-full border border-black flex items-center justify-center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M7 13l5 5 5-5M7 6l5 5 5-5"/></svg></div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- MediaPipe Vision + Drawing -->
+    <script type="module">
+        import { HandLandmarker, FilesetResolver, DrawingUtils } from
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs";
+
+        const video   = document.getElementById("webcam");
+        const canvas  = document.getElementById("overlay");
+        const ctx     = canvas.getContext("2d");
+        const status  = document.getElementById("status");
+        const coords  = document.getElementById("coords");
+
+        // Landmark names for logging
+        const LANDMARK_NAMES = [
+            "WRIST",
+            "THUMB_CMC","THUMB_MCP","THUMB_IP","THUMB_TIP",
+            "INDEX_MCP","INDEX_PIP","INDEX_DIP","INDEX_TIP",
+            "MIDDLE_MCP","MIDDLE_PIP","MIDDLE_DIP","MIDDLE_TIP",
+            "RING_MCP","RING_PIP","RING_DIP","RING_TIP",
+            "PINKY_MCP","PINKY_PIP","PINKY_DIP","PINKY_TIP"
+        ];
+
+        let handLandmarker;
+        let drawingUtils;
+        let lastTimestamp = -1;
+
+        async function init() {
+            status.textContent = "Loading Model...";
+
+            const filesetResolver = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm"
+            );
+
+            handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
+                baseOptions: {
+                    modelAssetPath:
+                        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                    delegate: "GPU",
+                },
+                runningMode: "VIDEO",
+                numHands: 2,
+                minHandDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5,
+            });
+
+            drawingUtils = new DrawingUtils(ctx);
+            status.textContent = "Requesting Camera...";
+            status.classList.replace("bg-black/5", "bg-yellow-100");
+            status.classList.replace("text-black", "text-yellow-700");
+
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720, facingMode: "user" },
+            });
+
+            video.srcObject = stream;
+            video.addEventListener("loadeddata", () => {
+                canvas.width  = video.videoWidth;
+                canvas.height = video.videoHeight;
+                status.textContent = "Tracking Active";
+                status.classList.replace("bg-yellow-100", "bg-green-100");
+                status.classList.replace("text-yellow-700", "text-green-700");
+                detect();
+            });
+        }
+
+        function detect() {
+            const now = performance.now();
+            if (now === lastTimestamp) {
+                requestAnimationFrame(detect);
+                return;
+            }
+            lastTimestamp = now;
+
+            const results = handLandmarker.detectForVideo(video, now);
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (results.landmarks && results.landmarks.length > 0) {
+                // Draw each hand
+                for (const landmarks of results.landmarks) {
+                    drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
+                        color: "#2ecc71",
+                        lineWidth: 4,
+                    });
+                    drawingUtils.drawLandmarks(landmarks, {
+                        color: "#ffffff",
+                        lineWidth: 2,
+                        radius: 5,
+                    });
+                }
+
+                // Build coordinate text
+                let text = "";
+                results.landmarks.forEach((hand, hi) => {
+                    const label = results.handednesses[hi]?.[0]?.categoryName ?? `Hand ${hi}`;
+                    text += `== ${label} ==\n`;
+                    hand.forEach((pt, i) => {
+                        text += `${LANDMARK_NAMES[i].padEnd(12)} x:${pt.x.toFixed(3)} y:${pt.y.toFixed(3)} z:${pt.z.toFixed(3)}\n`;
+                    });
+                    text += "\n";
+                });
+                coords.textContent = text.trimEnd();
+            } else {
+                coords.textContent = "No hands detected in frame.";
+            }
+
+            requestAnimationFrame(detect);
+        }
+
+        init().catch((err) => {
+            status.textContent = `Error: ${err.message}`;
+            status.classList.replace("bg-black/5", "bg-red-100");
+            status.classList.replace("text-black", "text-red-700");
+            console.error(err);
+        });
+    </script>
+</body>
+</html>
