@@ -100,6 +100,11 @@ class NarrateRequest(BaseModel):
     sequence: str
 
 
+class TranscribeRequest(BaseModel):
+    audio_base64: str
+    mime_type: str = "audio/webm"
+
+
 class WlaslPredictRequest(BaseModel):
     """Sequence of hands_pose frames (each length 258: pose 132 + lh 63 + rh 63)."""
     frames: List[List[float]]
@@ -165,6 +170,76 @@ def _gemini_tts_sync(sequence: str) -> tuple[str, bytes]:
         return speak_line or caption, wav_bytes
 
     raise RuntimeError("Gemini TTS returned no audio part")
+
+
+def _normalize_transcript_line(text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    low = t.lower().strip("[]().")
+    if low in ("silence", "no speech", "no audio", "empty", "none"):
+        return ""
+    if t.lower().startswith("[silence") and "]" in t:
+        return ""
+    return t
+
+
+def _gemini_transcribe_sync(audio_bytes: bytes, mime_type: str) -> str:
+    from google import genai
+    from google.genai import types
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+
+    model_name = os.environ.get("GEMINI_TRANSCRIBE_MODEL", "gemini-2.0-flash")
+    prompt = (
+        "Transcribe any spoken English in this audio. "
+        "Reply with ONLY the spoken words as plain text—no quotes, bullets, labels, or commentary. "
+        "If there is no speech or only background noise, reply with exactly: [silence]"
+    )
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=model_name,
+        contents=[
+            types.Part.from_bytes(data=audio_bytes, mime_type=mime_type or "audio/webm"),
+            types.Part.from_text(text=prompt),
+        ],
+    )
+    try:
+        return (response.text or "").strip()
+    except ValueError:
+        return ""
+
+
+@app.post("/gemini/transcribe")
+async def gemini_transcribe(request: TranscribeRequest):
+    if not os.environ.get("GEMINI_API_KEY"):
+        raise HTTPException(status_code=503, detail="GEMINI_API_KEY not set")
+
+    try:
+        raw = base64.b64decode(request.audio_base64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 audio")
+
+    max_bytes = int(os.environ.get("GEMINI_TRANSCRIBE_MAX_BYTES", str(8 * 1024 * 1024)))
+    if len(raw) > max_bytes:
+        raise HTTPException(status_code=400, detail="Audio chunk too large")
+
+    if len(raw) < 128:
+        return {"text": "", "skipped": True}
+
+    mime = (request.mime_type or "audio/webm").strip()
+    loop = asyncio.get_running_loop()
+    try:
+        raw_text = await loop.run_in_executor(None, _gemini_transcribe_sync, raw, mime)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gemini transcription error: {e!s}")
+
+    text = _normalize_transcript_line(raw_text)
+    return {"text": text, "skipped": False}
+
 
 @app.post("/gemini/narrate")
 async def gemini_narrate(request: NarrateRequest):

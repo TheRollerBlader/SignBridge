@@ -5,6 +5,7 @@ import Team from './pages/Team';
 import Demo from './pages/Demo';
 import Technology from './pages/Technology';
 import Methodology from './pages/Methodology';
+import Transcription from './pages/Transcription';
 
 function App() {
   return (
@@ -13,6 +14,7 @@ function App() {
         <Route index element={<Home />} />
         <Route path="team" element={<Team />} />
         <Route path="demo" element={<Demo />} />
+        <Route path="transcription" element={<Transcription />} />
         <Route path="technology" element={<Technology />} />
         <Route path="methodology" element={<Methodology />} />
       </Route>
