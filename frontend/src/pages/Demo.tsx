@@ -1,5 +1,58 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
+/** Dev: proxied by Vite to 127.0.0.1:8000. Prod: set VITE_API_BASE_URL (no trailing slash). */
+const apiBase =
+  import.meta.env.VITE_API_BASE_URL != null && String(import.meta.env.VITE_API_BASE_URL).trim() !== ''
+    ? String(import.meta.env.VITE_API_BASE_URL).replace(/\/$/, '')
+    : '';
+
+const predictUrl = apiBase ? `${apiBase}/predict` : '/api/predict';
+const narrateUrl = apiBase ? `${apiBase}/gemini/narrate` : '/api/gemini/narrate';
+const predictWlaslUrl = apiBase ? `${apiBase}/predict/wlasl` : '/api/predict/wlasl';
+
+/** Same layout as Training/mediapipe_extraction.py hands_pose: pose 33×4 + L hand 21×3 + R hand 21×3 = 258 */
+function buildHandsPose258(
+  pose: { x: number; y: number; z: number; visibility?: number }[] | undefined,
+  handResults: { landmarks?: unknown[]; handednesses?: { categoryName?: string; displayName?: string }[][] }
+): Float32Array {
+  const out = new Float32Array(258);
+  if (pose && pose.length >= 33) {
+    for (let i = 0; i < 33; i++) {
+      const l = pose[i];
+      out[i * 4] = l.x;
+      out[i * 4 + 1] = l.y;
+      out[i * 4 + 2] = l.z;
+      out[i * 4 + 3] = l.visibility ?? 0;
+    }
+  }
+  const lh = new Float32Array(63);
+  const rh = new Float32Array(63);
+  const lm = handResults.landmarks as { x: number; y: number; z: number }[][] | undefined;
+  const hs = handResults.handednesses;
+  if (lm) {
+    for (let h = 0; h < lm.length; h++) {
+      const handLm = lm[h];
+      let isLeft = false;
+      if (hs && hs[h]?.[0]) {
+        const name = (hs[h][0].categoryName ?? hs[h][0].displayName ?? '').toLowerCase();
+        isLeft = name.includes('left');
+      } else {
+        isLeft = h === 0;
+      }
+      const target = isLeft ? lh : rh;
+      for (let i = 0; i < 21; i++) {
+        const l = handLm[i];
+        target[i * 3] = l.x;
+        target[i * 3 + 1] = l.y;
+        target[i * 3 + 2] = l.z;
+      }
+    }
+  }
+  out.set(lh, 132);
+  out.set(rh, 132 + 63);
+  return out;
+}
+
 const Demo = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -11,6 +64,15 @@ const Demo = () => {
   const [predictedVector, setPredictedVector] = useState<string>('-');
   const [predictionConfidence, setPredictionConfidence] = useState<number | null>(null);
   const [translationSequence, setTranslationSequence] = useState<string>('');
+  const [apiOffline, setApiOffline] = useState(false);
+  /** 0 = voice off; 1–100 = Web Speech volume (Gemini phrase from backend). */
+  const [speakLevel, setSpeakLevel] = useState(0);
+  const [narrateSource, setNarrateSource] = useState<'idle' | 'gemini' | 'fallback'>('idle');
+  const [experimentalWlasl, setExperimentalWlasl] = useState(false);
+  const [wlaslPoseReady, setWlaslPoseReady] = useState(false);
+  const [wlaslWord, setWlaslWord] = useState<string | null>(null);
+  const [wlaslConfidence, setWlaslConfidence] = useState<number | null>(null);
+  const [wlaslError, setWlaslError] = useState<string | null>(null);
 
   const streamRef = useRef<MediaStream | null>(null);
   const animationFrameIdRef = useRef<number | null>(null);
@@ -21,6 +83,218 @@ const Demo = () => {
   const consecutivePredictionsRef = useRef<number>(0);
   const lastFetchTimeRef = useRef<number>(0);
   const lastHandPresenceTimeRef = useRef<number | null>(null);
+  const lastPredictErrorLogRef = useRef(0);
+  /** When true, widen time between /predict calls so DevTools are not flooded with 502s. */
+  const apiOfflineRef = useRef(false);
+  const narrateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** `translationSequence.trimEnd()` after we last spoke a completed word. */
+  const lastSpokenTrimmedRef = useRef<string | null>(null);
+  const speakLevelRef = useRef(0);
+  const narrateAudioRef = useRef<HTMLAudioElement | null>(null);
+  const poseLandmarkerRef = useRef<any>(null);
+  const experimentalWlaslRef = useRef(false);
+  const wlaslFrameBufferRef = useRef<number[][]>([]);
+  const lastWlaslFetchRef = useRef(0);
+  const lastWlaslHandTimeRef = useRef(0);
+
+  useEffect(() => {
+    speakLevelRef.current = speakLevel;
+  }, [speakLevel]);
+
+  useEffect(() => {
+    experimentalWlaslRef.current = experimentalWlasl;
+    if (!experimentalWlasl) {
+      wlaslFrameBufferRef.current = [];
+      setWlaslWord(null);
+      setWlaslConfidence(null);
+      setWlaslError(null);
+    } else {
+      setPredictedVector('-');
+      setPredictionConfidence(null);
+      lastPredictionRef.current = null;
+      consecutivePredictionsRef.current = 0;
+    }
+  }, [experimentalWlasl]);
+
+  useEffect(() => {
+    if (!experimentalWlasl) return;
+    let cancelled = false;
+
+    const loadPose = async () => {
+      setWlaslPoseReady(false);
+      try {
+        const { PoseLandmarker, FilesetResolver } = await import(
+          // @ts-ignore CDN ESM (same bundle as HandLandmarker)
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs'
+        );
+        const filesetResolver = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const pose = await PoseLandmarker.createFromOptions(filesetResolver, {
+          baseOptions: {
+            modelAssetPath:
+              'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'VIDEO',
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.5,
+          minPosePresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+        if (!cancelled) {
+          poseLandmarkerRef.current = pose;
+          setWlaslPoseReady(true);
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setWlaslError(e?.message ?? 'Pose model failed to load');
+          setWlaslPoseReady(false);
+        }
+      }
+    };
+
+    loadPose();
+    return () => {
+      cancelled = true;
+    };
+  }, [experimentalWlasl]);
+
+  useEffect(() => {
+    if (speakLevel === 0) {
+      speechSynthesis.cancel();
+      if (narrateAudioRef.current) {
+        narrateAudioRef.current.pause();
+        narrateAudioRef.current.src = '';
+        narrateAudioRef.current = null;
+      }
+      if (narrateTimeoutRef.current) {
+        clearTimeout(narrateTimeoutRef.current);
+        narrateTimeoutRef.current = null;
+      }
+      lastSpokenTrimmedRef.current = null;
+      setNarrateSource('idle');
+      return;
+    }
+
+    if (experimentalWlasl) {
+      speechSynthesis.cancel();
+      if (narrateAudioRef.current) {
+        narrateAudioRef.current.pause();
+        narrateAudioRef.current.src = '';
+        narrateAudioRef.current = null;
+      }
+      if (narrateTimeoutRef.current) {
+        clearTimeout(narrateTimeoutRef.current);
+        narrateTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    const seq = translationSequence;
+    if (narrateTimeoutRef.current) {
+      clearTimeout(narrateTimeoutRef.current);
+      narrateTimeoutRef.current = null;
+    }
+
+    if (!seq.trim()) {
+      lastSpokenTrimmedRef.current = null;
+      return;
+    }
+
+    // Only after a space: speak the last completed word (not letter-by-letter while spelling).
+    if (!/\s$/.test(seq)) {
+      return;
+    }
+
+    const trimmed = seq.trimEnd();
+    if (trimmed === lastSpokenTrimmedRef.current) {
+      return;
+    }
+
+    const parts = trimmed.split(/\s+/).filter(Boolean);
+    const word = parts[parts.length - 1];
+    if (!word) {
+      return;
+    }
+
+    narrateTimeoutRef.current = setTimeout(() => {
+      narrateTimeoutRef.current = null;
+      if (speakLevelRef.current === 0) return;
+
+      fetch(narrateUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sequence: word }),
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const err = await res.text();
+            throw new Error(err || `HTTP ${res.status}`);
+          }
+          return res.json() as Promise<{
+          phrase?: string;
+          source?: string;
+          audio_base64?: string | null;
+          audio_mime_type?: string;
+        }>;
+        })
+        .then((data) => {
+          const phrase = (data.phrase ?? '').trim();
+          if (!phrase && !data.audio_base64) return;
+
+          lastSpokenTrimmedRef.current = trimmed;
+          setNarrateSource(data.source === 'gemini' ? 'gemini' : 'fallback');
+
+          speechSynthesis.cancel();
+          if (narrateAudioRef.current) {
+            narrateAudioRef.current.pause();
+            narrateAudioRef.current.src = '';
+            narrateAudioRef.current = null;
+          }
+
+          const vol = Math.max(0, Math.min(1, speakLevelRef.current / 100));
+
+          if (data.audio_base64) {
+            const mime = data.audio_mime_type ?? 'audio/wav';
+            const audio = new Audio(`data:${mime};base64,${data.audio_base64}`);
+            audio.volume = vol;
+            narrateAudioRef.current = audio;
+            audio.play().catch(() => {
+              if (phrase) {
+                const u = new SpeechSynthesisUtterance(phrase);
+                u.volume = vol;
+                u.rate = 0.92;
+                speechSynthesis.speak(u);
+              }
+            });
+          } else if (phrase) {
+            const u = new SpeechSynthesisUtterance(phrase);
+            u.volume = vol;
+            u.rate = 0.92;
+            speechSynthesis.speak(u);
+          }
+        })
+        .catch(() => {
+          const fallback = word.toLowerCase();
+          if (!fallback) return;
+          lastSpokenTrimmedRef.current = trimmed;
+          setNarrateSource('fallback');
+          speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(fallback);
+          u.volume = Math.max(0, Math.min(1, speakLevelRef.current / 100));
+          u.rate = 0.92;
+          speechSynthesis.speak(u);
+        });
+    }, 720);
+
+    return () => {
+      if (narrateTimeoutRef.current) {
+        clearTimeout(narrateTimeoutRef.current);
+        narrateTimeoutRef.current = null;
+      }
+    };
+  }, [translationSequence, speakLevel, experimentalWlasl]);
 
   // Initialize MediaPipe model once
   useEffect(() => {
@@ -107,61 +381,143 @@ const Demo = () => {
                 });
             }
 
-            if (now - lastFetchTimeRef.current > 100) {
-                lastFetchTimeRef.current = now;
+            const minPredictGapMs = apiOfflineRef.current ? 2500 : 120;
+            if (
+              !experimentalWlaslRef.current &&
+              now - lastFetchTimeRef.current > minPredictGapMs
+            ) {
                 const landmarks = results.landmarks[0];
-                fetch('http://localhost:8000/predict', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        landmarks: landmarks,
-                        width: videoRef.current.videoWidth,
-                        height: videoRef.current.videoHeight
+                const vw = videoRef.current.videoWidth;
+                const vh = videoRef.current.videoHeight;
+                if (vw >= 2 && vh >= 2) {
+                    lastFetchTimeRef.current = now;
+                    fetch(predictUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            landmarks: landmarks,
+                            width: vw,
+                            height: vh
+                        })
                     })
-                })
-                .then(res => res.json())
-                .then(data => {
-                    if (data.letter) {
-                        setPredictedVector(data.letter);
-                        setPredictionConfidence(data.confidence);
+                    .then(async (res) => {
+                        if (!res.ok) {
+                            const text = await res.text();
+                            throw new Error(text || `HTTP ${res.status}`);
+                        }
+                        return res.json() as Promise<{ letter?: string | null; confidence?: number }>;
+                    })
+                    .then((data) => {
+                        apiOfflineRef.current = false;
+                        setApiOffline(false);
+                        if (data.letter != null && data.letter !== '') {
+                            setPredictedVector(data.letter);
+                            setPredictionConfidence(
+                                typeof data.confidence === 'number' ? data.confidence : null
+                            );
 
-                        if (data.letter === lastPredictionRef.current) {
-                            consecutivePredictionsRef.current += 1;
-                            if (consecutivePredictionsRef.current === 10) {
-                                setTranslationSequence(prev => prev + data.letter);
-                                consecutivePredictionsRef.current = -20;
+                            if (data.letter === lastPredictionRef.current) {
+                                consecutivePredictionsRef.current += 1;
+                                if (consecutivePredictionsRef.current === 10) {
+                                    setTranslationSequence(prev => prev + data.letter);
+                                    consecutivePredictionsRef.current = -20;
+                                }
+                            } else {
+                                lastPredictionRef.current = data.letter;
+                                consecutivePredictionsRef.current = 1;
                             }
                         } else {
-                            lastPredictionRef.current = data.letter;
-                            consecutivePredictionsRef.current = 1;
+                            setPredictedVector('-');
+                            setPredictionConfidence(null);
+                            lastPredictionRef.current = null;
+                            consecutivePredictionsRef.current = 0;
                         }
-                    } else {
+                    })
+                    .catch((err) => {
+                        apiOfflineRef.current = true;
+                        setApiOffline(true);
+                        const t = Date.now();
+                        if (t - lastPredictErrorLogRef.current > 12000) {
+                            lastPredictErrorLogRef.current = t;
+                            console.warn(
+                                'Classifier API unreachable (502 = Vite proxy could not connect to 127.0.0.1:8000). Install deps: pip install -r backend/requirements.txt then run: npm run dev:api (or npm run dev:all from frontend/).',
+                                err
+                            );
+                        }
+                    });
+                }
+            }
+          } else {
+            if (!experimentalWlaslRef.current) {
+                if (lastHandPresenceTimeRef.current) {
+                    if (now - lastHandPresenceTimeRef.current > 500) {
+                        setTranslationSequence(prev => {
+                            if (prev.endsWith(' ')) return prev;
+                            return prev + ' ';
+                        });
                         setPredictedVector('-');
                         setPredictionConfidence(null);
                         lastPredictionRef.current = null;
                         consecutivePredictionsRef.current = 0;
+                        lastHandPresenceTimeRef.current = null;
                     }
-                })
-                .catch(err => console.error("Prediction Error: ", err));
-            }
-          } else {
-            if (lastHandPresenceTimeRef.current) {
-                if (now - lastHandPresenceTimeRef.current > 500) {
-                    setTranslationSequence(prev => {
-                        if (prev.endsWith(' ')) return prev;
-                        return prev + ' ';
-                    });
+                } else {
                     setPredictedVector('-');
                     setPredictionConfidence(null);
                     lastPredictionRef.current = null;
                     consecutivePredictionsRef.current = 0;
-                    lastHandPresenceTimeRef.current = null;
                 }
-            } else {
-                setPredictedVector('-');
-                setPredictionConfidence(null);
-                lastPredictionRef.current = null;
-                consecutivePredictionsRef.current = 0;
+            }
+
+            if (
+              experimentalWlaslRef.current &&
+              poseLandmarkerRef.current &&
+              videoRef.current
+            ) {
+              const pr = poseLandmarkerRef.current.detectForVideo(videoRef.current, now);
+              const poseLm = pr.landmarks?.[0] as
+                | { x: number; y: number; z: number; visibility?: number }[]
+                | undefined;
+              const hasHand = !!(results.landmarks && results.landmarks.length > 0);
+              if (hasHand) {
+                lastWlaslHandTimeRef.current = now;
+                const feat = buildHandsPose258(poseLm, results);
+                const buf = wlaslFrameBufferRef.current;
+                buf.push(Array.from(feat));
+                if (buf.length > 50) buf.shift();
+                if (now - lastWlaslFetchRef.current > 300 && buf.length > 0) {
+                  lastWlaslFetchRef.current = now;
+                  fetch(predictWlaslUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ frames: buf, max_frames: 50 }),
+                  })
+                    .then(async (res) => {
+                      if (!res.ok) {
+                        const text = await res.text();
+                        throw new Error(text || `HTTP ${res.status}`);
+                      }
+                      return res.json() as Promise<{ word?: string; confidence?: number }>;
+                    })
+                    .then((data) => {
+                      setWlaslError(null);
+                      setWlaslWord(data.word ?? null);
+                      setWlaslConfidence(
+                        typeof data.confidence === 'number' ? data.confidence : null
+                      );
+                    })
+                    .catch((err: unknown) => {
+                      setWlaslWord(null);
+                      setWlaslConfidence(null);
+                      setWlaslError(err instanceof Error ? err.message : 'WLASL request failed');
+                    });
+                }
+              } else if (
+                wlaslFrameBufferRef.current.length > 0 &&
+                now - lastWlaslHandTimeRef.current > 500
+              ) {
+                wlaslFrameBufferRef.current = [];
+              }
             }
           }
       }
@@ -251,15 +607,32 @@ const Demo = () => {
             <p className="text-xl text-black/60 font-light leading-relaxed mb-8">
                 Hold your hand up to the camera to watch the geometric landmark detection pipeline translate American Sign Language directly in your browser.
             </p>
-            <div className="flex justify-center mt-6">
-                {!isCameraActive ? (
-                    <button onClick={startCamera} disabled={!isModelReady} className={`px-8 py-3 rounded-full font-bold text-sm tracking-widest uppercase shadow-lg transition-all duration-300 ${isModelReady ? 'bg-emerald-500 hover:bg-emerald-600 text-white hover:-translate-y-1' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}>
-                        {isModelReady ? 'Start Camera' : 'Loading Model...'}
-                    </button>
-                ) : (
-                    <button onClick={stopCamera} className="px-8 py-3 rounded-full font-bold text-sm tracking-widest uppercase shadow-lg transition-all duration-300 bg-red-500 hover:bg-red-600 text-white hover:-translate-y-1">
-                        Stop Camera
-                    </button>
+            <div className="flex flex-col items-center gap-4 mt-6">
+                <div className="flex justify-center">
+                    {!isCameraActive ? (
+                        <button onClick={startCamera} disabled={!isModelReady} className={`px-8 py-3 rounded-full font-bold text-sm tracking-widest uppercase shadow-lg transition-all duration-300 ${isModelReady ? 'bg-emerald-500 hover:bg-emerald-600 text-white hover:-translate-y-1' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}>
+                            {isModelReady ? 'Start Camera' : 'Loading Model...'}
+                        </button>
+                    ) : (
+                        <button onClick={stopCamera} className="px-8 py-3 rounded-full font-bold text-sm tracking-widest uppercase shadow-lg transition-all duration-300 bg-red-500 hover:bg-red-600 text-white hover:-translate-y-1">
+                            Stop Camera
+                        </button>
+                    )}
+                </div>
+                <button
+                    type="button"
+                    onClick={() => setExperimentalWlasl((v) => !v)}
+                    disabled={!isModelReady}
+                    className={`px-5 py-2.5 rounded-full text-xs font-semibold tracking-wide border transition-all ${
+                        experimentalWlasl
+                            ? 'bg-indigo-600 border-indigo-700 text-white shadow-md'
+                            : 'bg-white/80 border-indigo-200 text-indigo-800 hover:bg-indigo-50'
+                    } ${!isModelReady ? 'opacity-40 cursor-not-allowed' : ''}`}
+                >
+                    {experimentalWlasl ? 'Experimental WLASL: on' : 'Experimental: word translation (WLASL)'}
+                </button>
+                {experimentalWlasl && !wlaslPoseReady && (
+                    <p className="text-xs text-indigo-600/90">Loading pose model for WLASL features…</p>
                 )}
             </div>
         </div>
@@ -289,30 +662,109 @@ const Demo = () => {
                 </h3>
                 
                 <div className="flex-grow flex flex-col justify-center items-center py-10">
-                    <span className="text-xs uppercase tracking-widest text-black/40 font-bold mb-6">Current Vector</span>
-                    <div className="text-8xl md:text-[8rem] font-light font-['Inter'] text-black/80 tracking-tighter drop-shadow-sm flex items-center justify-center">
-                        <span className="relative text-black/90 text-transparent bg-clip-text bg-gradient-to-br from-black/90 to-black/60">{isCameraActive ? predictedVector : '-'}</span>
+                    {apiOffline && isCameraActive && !experimentalWlasl && (
+                        <p className="text-center text-xs text-amber-800 bg-amber-50 border border-amber-200/80 rounded-xl px-4 py-3 mb-6 max-w-sm leading-relaxed">
+                            <span className="block font-semibold text-amber-900 mb-1">502 — classifier API is not running</span>
+                            From the <code className="font-mono text-[0.7rem]">frontend</code> folder run{' '}
+                            <code className="font-mono text-[0.7rem] text-amber-900">npm run dev:all</code>
+                            , or in a second terminal:{' '}
+                            <code className="font-mono text-[0.7rem] text-amber-900">pip install -r ../backend/requirements.txt</code>{' '}
+                            then{' '}
+                            <code className="font-mono text-[0.7rem] text-amber-900">npm run dev:api</code>.
+                        </p>
+                    )}
+                    <span className="text-xs uppercase tracking-widest text-black/40 font-bold mb-6">
+                        {experimentalWlasl ? 'Current gloss' : 'Current Vector'}
+                    </span>
+                    <div
+                        className={`font-light font-['Inter'] text-black/80 drop-shadow-sm flex items-center justify-center text-center max-w-full px-2 ${
+                            experimentalWlasl
+                                ? 'text-3xl sm:text-4xl md:text-5xl leading-tight tracking-tight break-words'
+                                : 'text-8xl md:text-[8rem] tracking-tighter'
+                        }`}
+                    >
+                        <span className="relative text-black/90 text-transparent bg-clip-text bg-gradient-to-br from-black/90 to-black/60">
+                            {!isCameraActive
+                                ? '-'
+                                : experimentalWlasl
+                                  ? wlaslError
+                                    ? '—'
+                                    : (wlaslWord ?? '…')
+                                  : predictedVector}
+                        </span>
                     </div>
-                    {isCameraActive && predictionConfidence !== null && (
+                    {isCameraActive &&
+                        !experimentalWlasl &&
+                        predictionConfidence !== null && (
                         <div className="mt-8 px-4 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-50 text-emerald-700 text-xs font-medium tracking-wide">
                             Confidence: {(predictionConfidence * 100).toFixed(1)}%
                         </div>
                     )}
+                    {isCameraActive && experimentalWlasl && wlaslConfidence !== null && !wlaslError && (
+                        <div className="mt-8 px-4 py-1.5 rounded-full border border-indigo-500/30 bg-indigo-50 text-indigo-700 text-xs font-medium tracking-wide">
+                            Confidence: {(wlaslConfidence * 100).toFixed(1)}%
+                        </div>
+                    )}
+
+                    {experimentalWlasl && wlaslError && (
+                        <div className="mt-6 w-full max-w-sm rounded-2xl border border-red-200/80 bg-red-50/50 px-4 py-3 text-left">
+                            <div className="text-[0.65rem] uppercase tracking-widest text-red-800/80 font-bold mb-1">
+                                WLASL error
+                            </div>
+                            <p className="text-xs text-red-700/95 leading-snug">{wlaslError}</p>
+                        </div>
+                    )}
                 </div>
 
-                <div className="mt-auto w-full">
-                    <h4 className="text-[0.65rem] uppercase tracking-widest text-black/40 font-bold mb-3 flex justify-between items-center">
-                        Translation Sequence
-                        <button onClick={() => setTranslationSequence(prev => prev.slice(0, -1))} className="bg-red-50 text-red-500 hover:bg-red-100 border border-red-200 px-3 py-1 rounded-full text-[0.60rem] transition-colors uppercase tracking-widest font-semibold flex items-center gap-1 shadow-sm">
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M3 12l6.414 6.414a2 2 0 001.414.586H19a2 2 0 002-2V7a2 2 0 00-2-2h-8.172a2 2 0 00-1.414.586L3 12z" /></svg>
-                            BSPC
-                        </button>
-                    </h4>
-                    <div className="p-6 rounded-2xl bg-white/40 border border-white/60 shadow-[inset_0_2px_12px_rgba(0,0,0,0.03)] min-h-[120px] flex items-start">
-                        <p className="font-mono text-xl tracking-[0.2em] text-black/80 font-medium leading-relaxed uppercase whitespace-pre-wrap break-words w-full">
-                            {translationSequence}<span className="text-emerald-500 -ml-1 animate-pulse">_</span>
+                <div className="mt-auto w-full space-y-5">
+                    {experimentalWlasl ? (
+                        <p className="text-center text-xs text-black/45 px-2">
+                            Fingerspelling, translation sequence, and voice slider are off while WLASL experimental mode is on.
                         </p>
-                    </div>
+                    ) : (
+                        <>
+                            <div className="rounded-2xl border border-violet-200/60 bg-violet-50/40 px-4 py-3">
+                                <div className="flex justify-between items-center gap-3 mb-2">
+                                    <span className="text-[0.65rem] uppercase tracking-widest text-violet-900/70 font-bold">
+                                        Speak (Gemini TTS)
+                                    </span>
+                                    <span className="text-[0.65rem] font-mono text-violet-700/80 tabular-nums">
+                                        {speakLevel === 0 ? 'Off' : `${speakLevel}%`}
+                                    </span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={100}
+                                    value={speakLevel}
+                                    onChange={(e) => setSpeakLevel(Number(e.target.value))}
+                                    className="w-full h-2 rounded-full appearance-none cursor-pointer accent-violet-600 bg-violet-200/60"
+                                    aria-label="Speak aloud volume"
+                                />
+                                <p className="mt-2 text-[0.65rem] text-black/45 leading-snug">
+                                    With the slider on, each time you finish a word (a space is added—pause between words or end of a sign), only that word is sent to{' '}
+                                    <code className="font-mono text-[0.6rem]">gemini-2.5-flash-preview-tts</code> and spoken as a normal word, not letter-by-letter. Set{' '}
+                                    <code className="font-mono text-[0.6rem]">GEMINI_API_KEY</code>
+                                    . Without a key, the browser speaks the word instead.
+                                    {narrateSource === 'fallback' && speakLevel > 0 && (
+                                        <span className="block mt-1 text-amber-700/90">Using browser voice (add API key for Gemini TTS).</span>
+                                    )}
+                                </p>
+                            </div>
+                            <h4 className="text-[0.65rem] uppercase tracking-widest text-black/40 font-bold mb-3 flex justify-between items-center">
+                                Translation Sequence
+                                <button onClick={() => setTranslationSequence(prev => prev.slice(0, -1))} className="bg-red-50 text-red-500 hover:bg-red-100 border border-red-200 px-3 py-1 rounded-full text-[0.60rem] transition-colors uppercase tracking-widest font-semibold flex items-center gap-1 shadow-sm">
+                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M3 12l6.414 6.414a2 2 0 001.414.586H19a2 2 0 002-2V7a2 2 0 00-2-2h-8.172a2 2 0 00-1.414.586L3 12z" /></svg>
+                                    BSPC
+                                </button>
+                            </h4>
+                            <div className="p-6 rounded-2xl bg-white/40 border border-white/60 shadow-[inset_0_2px_12px_rgba(0,0,0,0.03)] min-h-[120px] flex items-start">
+                                <p className="font-mono text-xl tracking-[0.2em] text-black/80 font-medium leading-relaxed uppercase whitespace-pre-wrap break-words w-full">
+                                    {translationSequence}<span className="text-emerald-500 -ml-1 animate-pulse">_</span>
+                                </p>
+                            </div>
+                        </>
+                    )}
                 </div>
             </div>
         </div>
