@@ -11,7 +11,7 @@ try:
     load_dotenv(Path(__file__).resolve().parent / ".env")
 except ImportError:
     pass
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -20,6 +20,41 @@ import csv
 import itertools
 import copy
 from ai_edge_litert.interpreter import Interpreter
+
+from gemini_live_ws import run_live_transcribe_session
+
+
+def _http_from_gemini_error(exc: BaseException) -> Optional[HTTPException]:
+    """Map google-genai APIError to FastAPI responses (avoid turning 429 into 500)."""
+    try:
+        from google.genai import errors as genai_errors
+    except ImportError:
+        return None
+    if not isinstance(exc, genai_errors.APIError):
+        return None
+    code = int(exc.code) if exc.code is not None else 502
+    msg = (exc.message or str(exc))[:8000]
+    if code == 429:
+        return HTTPException(
+            status_code=429,
+            detail="Gemini rate limit or quota exceeded. Free tier is very low for some models—wait and retry, enable billing, or reduce requests (e.g. turn off Speak slider). "
+            + msg,
+        )
+    if code in (400, 403, 404):
+        return HTTPException(status_code=502, detail=msg)
+    if code >= 500:
+        return HTTPException(status_code=502, detail=msg)
+    return HTTPException(status_code=502, detail=msg)
+
+
+def _resolve_api_key(request: Request | None = None) -> str | None:
+    """Return Gemini API key from the request header, falling back to env."""
+    if request:
+        hdr = request.headers.get("x-gemini-api-key")
+        if hdr and hdr.strip():
+            return hdr.strip()
+    return os.environ.get("GEMINI_API_KEY") or None
+
 
 app = FastAPI()
 
@@ -30,6 +65,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.websocket("/ws/live-transcribe")
+async def websocket_live_transcribe(
+    websocket: WebSocket,
+    key: str | None = None,
+    deaf_lang: str | None = None,
+    hearing_lang: str | None = None,
+):
+    await websocket.accept()
+    api_key = (key or "").strip() or os.environ.get("GEMINI_API_KEY") or None
+    await run_live_transcribe_session(
+        websocket,
+        api_key=api_key,
+        deaf_lang=(deaf_lang or "").strip() or "English",
+        hearing_lang=(hearing_lang or "").strip() or "English",
+    )
+
 
 def load_labels(csv_path):
     with open(csv_path, encoding='utf-8-sig') as f:
@@ -98,6 +151,7 @@ class LandmarkRequest(BaseModel):
 
 class NarrateRequest(BaseModel):
     sequence: str
+    target_lang: str = "English"
 
 
 class TranscribeRequest(BaseModel):
@@ -123,12 +177,17 @@ def _pcm_to_wav(pcm: bytes, channels: int = 1, rate: int = 24000, sample_width: 
         wf.writeframes(pcm)
     return buf.getvalue()
 
-def _gemini_tts_sync(sequence: str) -> tuple[str, bytes]:
+def _gemini_tts_sync(
+    sequence: str,
+    api_key: str | None = None,
+    target_lang: str = "English",
+) -> tuple[str, bytes]:
     """Returns (caption text for UI, WAV bytes). Empty bytes if no API key."""
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY")
     caption = _fallback_speak_phrase(sequence)
     speak_line = caption.strip().lower() if caption.strip() else ""
     if not api_key:
@@ -137,12 +196,18 @@ def _gemini_tts_sync(sequence: str) -> tuple[str, bytes]:
     model_name = os.environ.get("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
     voice_name = os.environ.get("GEMINI_TTS_VOICE", "Kore")
 
-    # Client sends one completed word at a time (after a space). Speak it as a normal English word, not letter-by-letter.
-    tts_prompt = (
-        "Say this as a normal spoken English word or short phrase—one smooth pronunciation. "
-        "Do not spell out letters; do not pause between letters. "
-        f"Word: {speak_line}"
-    )
+    if target_lang and target_lang.lower() != "english":
+        tts_prompt = (
+            f"Translate the following English word or short phrase into {target_lang}, "
+            f"then say the {target_lang} translation aloud as one smooth pronunciation. "
+            f"Do not say the English original. Word: {speak_line}"
+        )
+    else:
+        tts_prompt = (
+            "Say this as a normal spoken English word or short phrase—one smooth pronunciation. "
+            "Do not spell out letters; do not pause between letters. "
+            f"Word: {speak_line}"
+        )
 
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
@@ -184,15 +249,16 @@ def _normalize_transcript_line(text: str) -> str:
     return t
 
 
-def _gemini_transcribe_sync(audio_bytes: bytes, mime_type: str) -> str:
+def _gemini_transcribe_sync(audio_bytes: bytes, mime_type: str, api_key: str | None = None) -> str:
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set")
+        api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("No Gemini API key provided")
 
-    model_name = os.environ.get("GEMINI_TRANSCRIBE_MODEL", "gemini-2.0-flash")
+    model_name = os.environ.get("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash")
     prompt = (
         "Transcribe any spoken English in this audio. "
         "Reply with ONLY the spoken words as plain text—no quotes, bullets, labels, or commentary. "
@@ -203,8 +269,8 @@ def _gemini_transcribe_sync(audio_bytes: bytes, mime_type: str) -> str:
     response = client.models.generate_content(
         model=model_name,
         contents=[
-            types.Part.from_bytes(data=audio_bytes, mime_type=mime_type or "audio/webm"),
             types.Part.from_text(text=prompt),
+            types.Part.from_bytes(data=audio_bytes, mime_type=mime_type or "audio/webm"),
         ],
     )
     try:
@@ -214,12 +280,13 @@ def _gemini_transcribe_sync(audio_bytes: bytes, mime_type: str) -> str:
 
 
 @app.post("/gemini/transcribe")
-async def gemini_transcribe(request: TranscribeRequest):
-    if not os.environ.get("GEMINI_API_KEY"):
-        raise HTTPException(status_code=503, detail="GEMINI_API_KEY not set")
+async def gemini_transcribe(body: TranscribeRequest, request: Request):
+    api_key = _resolve_api_key(request)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="No Gemini API key provided")
 
     try:
-        raw = base64.b64decode(request.audio_base64, validate=True)
+        raw = base64.b64decode(body.audio_base64, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid base64 audio")
 
@@ -230,11 +297,14 @@ async def gemini_transcribe(request: TranscribeRequest):
     if len(raw) < 128:
         return {"text": "", "skipped": True}
 
-    mime = (request.mime_type or "audio/webm").strip()
+    mime = (body.mime_type or "audio/webm").strip()
     loop = asyncio.get_running_loop()
     try:
-        raw_text = await loop.run_in_executor(None, _gemini_transcribe_sync, raw, mime)
+        raw_text = await loop.run_in_executor(None, _gemini_transcribe_sync, raw, mime, api_key)
     except Exception as e:
+        mapped = _http_from_gemini_error(e)
+        if mapped:
+            raise mapped
         raise HTTPException(status_code=500, detail=f"Gemini transcription error: {e!s}")
 
     text = _normalize_transcript_line(raw_text)
@@ -242,22 +312,28 @@ async def gemini_transcribe(request: TranscribeRequest):
 
 
 @app.post("/gemini/narrate")
-async def gemini_narrate(request: NarrateRequest):
-    raw = request.sequence
+async def gemini_narrate(body: NarrateRequest, request: Request):
+    raw = body.sequence
     if len(raw) > 4000:
         raise HTTPException(status_code=400, detail="Sequence too long")
 
     if not raw.strip():
         return {"phrase": "", "source": "empty", "audio_base64": None}
 
-    has_key = bool(os.environ.get("GEMINI_API_KEY"))
+    api_key = _resolve_api_key(request)
     loop = asyncio.get_running_loop()
     try:
-        phrase, wav_bytes = await loop.run_in_executor(None, _gemini_tts_sync, raw)
+        target_lang = body.target_lang or "English"
+        phrase, wav_bytes = await loop.run_in_executor(
+            None, _gemini_tts_sync, raw, api_key, target_lang
+        )
     except Exception as e:
+        mapped = _http_from_gemini_error(e)
+        if mapped:
+            raise mapped
         raise HTTPException(status_code=500, detail=f"Gemini error: {e!s}")
 
-    source = "gemini" if has_key and wav_bytes else "fallback"
+    source = "gemini" if api_key and wav_bytes else "fallback"
     audio_b64 = base64.b64encode(wav_bytes).decode("ascii") if wav_bytes else None
 
     return {

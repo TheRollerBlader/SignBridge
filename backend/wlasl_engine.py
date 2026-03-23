@@ -19,6 +19,23 @@ if str(_REPO_ROOT) not in sys.path:
 import wlasl_demo as wd  # noqa: E402
 
 
+_WLASL_100_GLOSSES = [
+    "accident", "africa", "all", "apple", "basketball", "bed", "before",
+    "bird", "birthday", "black", "blue", "book", "bowling", "brown", "but",
+    "can", "candy", "chair", "change", "cheat", "city", "clothes", "color",
+    "computer", "cook", "cool", "corn", "cousin", "cow", "dance", "dark",
+    "deaf", "decide", "doctor", "dog", "drink", "eat", "enjoy", "family",
+    "fine", "finish", "fish", "forget", "full", "give", "go", "graduate",
+    "hat", "hearing", "help", "hot", "how", "jacket", "kiss", "language",
+    "last", "later", "letter", "like", "man", "many", "medicine", "meet",
+    "mother", "need", "no", "now", "orange", "paint", "paper", "pink",
+    "pizza", "play", "pull", "purple", "right", "same", "school",
+    "secretary", "shirt", "short", "son", "study", "table", "tall", "tell",
+    "thanksgiving", "thin", "thursday", "time", "walk", "want", "what",
+    "white", "who", "woman", "work", "wrong", "year", "yes",
+]
+
+
 def _load_labels(num_classes: int) -> list[str]:
     path = os.environ.get("WLASL_LABELS_PATH")
     if path:
@@ -31,6 +48,9 @@ def _load_labels(num_classes: int) -> list[str]:
             lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
             if len(lines) == num_classes:
                 return lines
+
+    if num_classes == 100:
+        return list(_WLASL_100_GLOSSES)
 
     wlasl_root = os.environ.get("WLASL_ROOT")
     feature_subdir = os.environ.get("WLASL_FEATURE_SUBDIR", "features_hands_pose_hand_gated")

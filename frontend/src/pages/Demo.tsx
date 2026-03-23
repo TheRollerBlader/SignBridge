@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { startLiveCaptionSession, type LiveCaptionHandle } from '../lib/liveCaption';
 
 /** Dev: proxied by Vite to 127.0.0.1:8000. Prod: set VITE_API_BASE_URL (no trailing slash). */
 const apiBase =
@@ -53,6 +54,14 @@ function buildHandsPose258(
   return out;
 }
 
+const API_KEY_STORAGE_KEY = 'signbridge_gemini_api_key';
+
+const LANGUAGES = [
+  'English', 'Spanish', 'French', 'German', 'Portuguese', 'Italian',
+  'Chinese', 'Japanese', 'Korean', 'Arabic', 'Hindi', 'Russian',
+  'Dutch', 'Turkish', 'Polish', 'Vietnamese', 'Thai', 'Indonesian',
+] as const;
+
 const Demo = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -60,10 +69,18 @@ const Demo = () => {
   const [status, setStatus] = useState({ text: 'Model Initializing', classes: 'bg-emerald-50 text-emerald-600 border-emerald-100' });
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isModelReady, setIsModelReady] = useState(false);
+  const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem(API_KEY_STORAGE_KEY) ?? '');
+  const [showKey, setShowKey] = useState(false);
+  const geminiKeyRef = useRef(geminiKey);
+  const [deafLang, setDeafLang] = useState(() => localStorage.getItem('signbridge_deaf_lang') ?? 'English');
+  const [hearingLang, setHearingLang] = useState(() => localStorage.getItem('signbridge_hearing_lang') ?? 'English');
+  const deafLangRef = useRef(deafLang);
+  const hearingLangRef = useRef(hearingLang);
 
   const [predictedVector, setPredictedVector] = useState<string>('-');
   const [predictionConfidence, setPredictionConfidence] = useState<number | null>(null);
   const [translationSequence, setTranslationSequence] = useState<string>('');
+  const [hearingTranscript, setHearingTranscript] = useState<string>('');
   const [apiOffline, setApiOffline] = useState(false);
   /** 0 = voice off; 1–100 = Web Speech volume (Gemini phrase from backend). */
   const [speakLevel, setSpeakLevel] = useState(0);
@@ -96,6 +113,31 @@ const Demo = () => {
   const wlaslFrameBufferRef = useRef<number[][]>([]);
   const lastWlaslFetchRef = useRef(0);
   const lastWlaslHandTimeRef = useRef(0);
+  /** Last change to translation sequence: signing vs partner speech (TTS skips speech-sourced chunks). */
+  const lastSeqMutationRef = useRef<'sign' | 'speech' | null>(null);
+  const narrateBackoffUntilRef = useRef(0);
+  const liveCaptionRef = useRef<LiveCaptionHandle | null>(null);
+
+  const [hasMicTrack, setHasMicTrack] = useState(false);
+  const [liveCaptionActive, setLiveCaptionActive] = useState(false);
+  const [liveSpeechDraft, setLiveSpeechDraft] = useState('');
+  const [captionApiHint, setCaptionApiHint] = useState<string | null>(null);
+
+  useEffect(() => {
+    geminiKeyRef.current = geminiKey;
+    if (geminiKey) localStorage.setItem(API_KEY_STORAGE_KEY, geminiKey);
+    else localStorage.removeItem(API_KEY_STORAGE_KEY);
+  }, [geminiKey]);
+
+  useEffect(() => {
+    deafLangRef.current = deafLang;
+    localStorage.setItem('signbridge_deaf_lang', deafLang);
+  }, [deafLang]);
+
+  useEffect(() => {
+    hearingLangRef.current = hearingLang;
+    localStorage.setItem('signbridge_hearing_lang', hearingLang);
+  }, [hearingLang]);
 
   useEffect(() => {
     speakLevelRef.current = speakLevel;
@@ -218,16 +260,33 @@ const Demo = () => {
       return;
     }
 
+    if (lastSeqMutationRef.current === 'speech') {
+      lastSeqMutationRef.current = null;
+      lastSpokenTrimmedRef.current = trimmed;
+      return;
+    }
+
     narrateTimeoutRef.current = setTimeout(() => {
       narrateTimeoutRef.current = null;
       if (speakLevelRef.current === 0) return;
+      if (Date.now() < narrateBackoffUntilRef.current) {
+        lastSpokenTrimmedRef.current = trimmed;
+        return;
+      }
 
+      const hdrs: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (geminiKeyRef.current) hdrs['X-Gemini-Api-Key'] = geminiKeyRef.current;
       fetch(narrateUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sequence: word }),
+        headers: hdrs,
+        body: JSON.stringify({ sequence: word, target_lang: hearingLangRef.current }),
       })
         .then(async (res) => {
+          if (res.status === 429) {
+            narrateBackoffUntilRef.current = Date.now() + 120_000;
+            const err = await res.text();
+            throw new Error(err || '429');
+          }
           if (!res.ok) {
             const err = await res.text();
             throw new Error(err || `HTTP ${res.status}`);
@@ -255,35 +314,52 @@ const Demo = () => {
 
           const vol = Math.max(0, Math.min(1, speakLevelRef.current / 100));
 
+          liveCaptionRef.current?.mute();
+
           if (data.audio_base64) {
             const mime = data.audio_mime_type ?? 'audio/wav';
             const audio = new Audio(`data:${mime};base64,${data.audio_base64}`);
             audio.volume = vol;
             narrateAudioRef.current = audio;
+            audio.onended = () => liveCaptionRef.current?.unmute();
+            audio.onerror = () => liveCaptionRef.current?.unmute();
             audio.play().catch(() => {
               if (phrase) {
                 const u = new SpeechSynthesisUtterance(phrase);
                 u.volume = vol;
                 u.rate = 0.92;
+                u.onend = () => liveCaptionRef.current?.unmute();
+                u.onerror = () => liveCaptionRef.current?.unmute();
                 speechSynthesis.speak(u);
+              } else {
+                liveCaptionRef.current?.unmute();
               }
             });
           } else if (phrase) {
             const u = new SpeechSynthesisUtterance(phrase);
             u.volume = vol;
             u.rate = 0.92;
+            u.onend = () => liveCaptionRef.current?.unmute();
+            u.onerror = () => liveCaptionRef.current?.unmute();
             speechSynthesis.speak(u);
+          } else {
+            liveCaptionRef.current?.unmute();
           }
         })
         .catch(() => {
           const fallback = word.toLowerCase();
-          if (!fallback) return;
+          if (!fallback) {
+            liveCaptionRef.current?.unmute();
+            return;
+          }
           lastSpokenTrimmedRef.current = trimmed;
           setNarrateSource('fallback');
           speechSynthesis.cancel();
           const u = new SpeechSynthesisUtterance(fallback);
           u.volume = Math.max(0, Math.min(1, speakLevelRef.current / 100));
           u.rate = 0.92;
+          u.onend = () => liveCaptionRef.current?.unmute();
+          u.onerror = () => liveCaptionRef.current?.unmute();
           speechSynthesis.speak(u);
         });
     }, 720);
@@ -295,6 +371,74 @@ const Demo = () => {
       }
     };
   }, [translationSequence, speakLevel, experimentalWlasl]);
+
+  useEffect(() => {
+    if (!isCameraActive || experimentalWlasl) {
+      liveCaptionRef.current?.dispose();
+      liveCaptionRef.current = null;
+      setLiveCaptionActive(false);
+      setLiveSpeechDraft('');
+      return;
+    }
+
+    const stream = streamRef.current;
+    if (!stream) return;
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0) return;
+
+    const audioStream = new MediaStream(audioTracks);
+    let cancelled = false;
+
+    const isTranslating = deafLangRef.current !== hearingLangRef.current;
+
+    const commitSpeech = (line: string) => {
+      if (!line) return;
+      lastSeqMutationRef.current = 'speech';
+      setHearingTranscript((prev) => {
+        const needsSpace = prev.length > 0 && !/\s$/.test(prev);
+        return prev + (needsSpace ? ' ' : '') + line + ' ';
+      });
+    };
+
+    void startLiveCaptionSession(audioStream, {
+      onConnection: (open) => {
+        setLiveCaptionActive(open);
+        if (open) setCaptionApiHint(null);
+      },
+      onError: (msg) => setCaptionApiHint(msg.slice(0, 500)),
+      onTranscript: (text, finished) => {
+        if (finished) {
+          setLiveSpeechDraft('');
+          if (!isTranslating) commitSpeech(text.trim());
+        } else {
+          if (text) setLiveSpeechDraft(text);
+        }
+      },
+      onTranslation: (text) => {
+        setLiveSpeechDraft('');
+        commitSpeech(text.trim());
+      },
+    }, {
+      apiKey: geminiKeyRef.current || undefined,
+      deafLang: deafLangRef.current,
+      hearingLang: hearingLangRef.current,
+    })
+      .then((handle) => {
+        if (!cancelled) liveCaptionRef.current = handle;
+      })
+      .catch((e: unknown) => {
+        setCaptionApiHint(e instanceof Error ? e.message.slice(0, 500) : 'Live captions failed to start');
+        setLiveCaptionActive(false);
+      });
+
+    return () => {
+      cancelled = true;
+      liveCaptionRef.current?.dispose();
+      liveCaptionRef.current = null;
+      setLiveCaptionActive(false);
+      setLiveSpeechDraft('');
+    };
+  }, [isCameraActive, experimentalWlasl]);
 
   // Initialize MediaPipe model once
   useEffect(() => {
@@ -381,11 +525,48 @@ const Demo = () => {
                 });
             }
 
-            const minPredictGapMs = apiOfflineRef.current ? 2500 : 120;
-            if (
-              !experimentalWlaslRef.current &&
-              now - lastFetchTimeRef.current > minPredictGapMs
-            ) {
+            if (experimentalWlaslRef.current) {
+              if (poseLandmarkerRef.current && videoRef.current) {
+                const pr = poseLandmarkerRef.current.detectForVideo(videoRef.current, now);
+                const poseLm = pr.landmarks?.[0] as
+                  | { x: number; y: number; z: number; visibility?: number }[]
+                  | undefined;
+                lastWlaslHandTimeRef.current = now;
+                const feat = buildHandsPose258(poseLm, results);
+                const buf = wlaslFrameBufferRef.current;
+                buf.push(Array.from(feat));
+                if (buf.length > 50) buf.shift();
+                if (now - lastWlaslFetchRef.current > 300 && buf.length > 0) {
+                  lastWlaslFetchRef.current = now;
+                  fetch(predictWlaslUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ frames: buf, max_frames: 50 }),
+                  })
+                    .then(async (res) => {
+                      if (!res.ok) {
+                        const text = await res.text();
+                        throw new Error(text || `HTTP ${res.status}`);
+                      }
+                      return res.json() as Promise<{ word?: string; confidence?: number }>;
+                    })
+                    .then((data) => {
+                      setWlaslError(null);
+                      setWlaslWord(data.word ?? null);
+                      setWlaslConfidence(
+                        typeof data.confidence === 'number' ? data.confidence : null
+                      );
+                    })
+                    .catch((err: unknown) => {
+                      setWlaslWord(null);
+                      setWlaslConfidence(null);
+                      setWlaslError(err instanceof Error ? err.message : 'WLASL request failed');
+                    });
+                }
+              }
+            } else {
+              const minPredictGapMs = apiOfflineRef.current ? 2500 : 120;
+              if (now - lastFetchTimeRef.current > minPredictGapMs) {
                 const landmarks = results.landmarks[0];
                 const vw = videoRef.current.videoWidth;
                 const vh = videoRef.current.videoHeight;
@@ -419,7 +600,8 @@ const Demo = () => {
                             if (data.letter === lastPredictionRef.current) {
                                 consecutivePredictionsRef.current += 1;
                                 if (consecutivePredictionsRef.current === 10) {
-                                    setTranslationSequence(prev => prev + data.letter);
+                                    lastSeqMutationRef.current = 'sign';
+                                    setTranslationSequence((prev) => prev + data.letter);
                                     consecutivePredictionsRef.current = -20;
                                 }
                             } else {
@@ -446,12 +628,14 @@ const Demo = () => {
                         }
                     });
                 }
+              }
             }
           } else {
             if (!experimentalWlaslRef.current) {
                 if (lastHandPresenceTimeRef.current) {
                     if (now - lastHandPresenceTimeRef.current > 500) {
-                        setTranslationSequence(prev => {
+                        lastSeqMutationRef.current = 'sign';
+                        setTranslationSequence((prev) => {
                             if (prev.endsWith(' ')) return prev;
                             return prev + ' ';
                         });
@@ -467,57 +651,11 @@ const Demo = () => {
                     lastPredictionRef.current = null;
                     consecutivePredictionsRef.current = 0;
                 }
-            }
-
-            if (
-              experimentalWlaslRef.current &&
-              poseLandmarkerRef.current &&
-              videoRef.current
+            } else if (
+              wlaslFrameBufferRef.current.length > 0 &&
+              now - lastWlaslHandTimeRef.current > 500
             ) {
-              const pr = poseLandmarkerRef.current.detectForVideo(videoRef.current, now);
-              const poseLm = pr.landmarks?.[0] as
-                | { x: number; y: number; z: number; visibility?: number }[]
-                | undefined;
-              const hasHand = !!(results.landmarks && results.landmarks.length > 0);
-              if (hasHand) {
-                lastWlaslHandTimeRef.current = now;
-                const feat = buildHandsPose258(poseLm, results);
-                const buf = wlaslFrameBufferRef.current;
-                buf.push(Array.from(feat));
-                if (buf.length > 50) buf.shift();
-                if (now - lastWlaslFetchRef.current > 300 && buf.length > 0) {
-                  lastWlaslFetchRef.current = now;
-                  fetch(predictWlaslUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ frames: buf, max_frames: 50 }),
-                  })
-                    .then(async (res) => {
-                      if (!res.ok) {
-                        const text = await res.text();
-                        throw new Error(text || `HTTP ${res.status}`);
-                      }
-                      return res.json() as Promise<{ word?: string; confidence?: number }>;
-                    })
-                    .then((data) => {
-                      setWlaslError(null);
-                      setWlaslWord(data.word ?? null);
-                      setWlaslConfidence(
-                        typeof data.confidence === 'number' ? data.confidence : null
-                      );
-                    })
-                    .catch((err: unknown) => {
-                      setWlaslWord(null);
-                      setWlaslConfidence(null);
-                      setWlaslError(err instanceof Error ? err.message : 'WLASL request failed');
-                    });
-                }
-              } else if (
-                wlaslFrameBufferRef.current.length > 0 &&
-                now - lastWlaslHandTimeRef.current > 500
-              ) {
-                wlaslFrameBufferRef.current = [];
-              }
+              wlaslFrameBufferRef.current = [];
             }
           }
       }
@@ -545,10 +683,20 @@ const Demo = () => {
     try {
       setStatus({ text: 'Requesting Camera...', classes: 'bg-yellow-100 text-yellow-700 border-yellow-200' });
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 1280, height: 720, facingMode: "user" },
-      });
-      
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 1280, height: 720, facingMode: 'user' },
+          audio: { echoCancellation: true, noiseSuppression: true },
+        });
+        setHasMicTrack(stream.getAudioTracks().length > 0);
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 1280, height: 720, facingMode: 'user' },
+        });
+        setHasMicTrack(false);
+      }
+
       streamRef.current = stream;
 
       if (videoRef.current) {
@@ -583,6 +731,7 @@ const Demo = () => {
       videoRef.current.srcObject = null;
     }
     setCameraActive(false);
+    setHasMicTrack(false);
     setStatus({ text: 'Camera Stopped', classes: 'bg-gray-100 text-gray-700 border-gray-200' });
     
     // Clear canvas
@@ -600,14 +749,45 @@ const Demo = () => {
   }, []);
 
   return (
-    <main className="flex-grow flex flex-col items-center px-6 pt-10 pb-20 w-full max-w-6xl mx-auto animate-spring-up">
+    <main className="flex-grow flex flex-col items-center px-6 pt-10 pb-20 w-full max-w-7xl mx-auto animate-spring-up">
         <div className="text-center mb-16 w-full max-w-3xl">
             <div className="text-xs uppercase tracking-[0.2em] text-emerald-600 font-semibold mb-4">Live Browser Inference</div>
             <h1 className="text-5xl md:text-6xl font-light tracking-wide mb-6 font-['Inter']">Real-Time Translation</h1>
             <p className="text-xl text-black/60 font-light leading-relaxed mb-8">
-                Hold your hand up to the camera to watch the geometric landmark detection pipeline translate American Sign Language directly in your browser.
+                One shared conversation log: your signs appear as letters, and speech picked up by the mic is transcribed into the same line so both people can follow the thread.
             </p>
             <div className="flex flex-col items-center gap-4 mt-6">
+                <div className="w-full max-w-md flex items-center gap-2 rounded-full border border-black/10 bg-white/60 backdrop-blur-sm px-4 py-2 shadow-sm">
+                    <svg className="w-4 h-4 text-black/30 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" /></svg>
+                    <input
+                        type={showKey ? 'text' : 'password'}
+                        value={geminiKey}
+                        onChange={(e) => setGeminiKey(e.target.value)}
+                        placeholder="Gemini API key"
+                        spellCheck={false}
+                        className="flex-1 bg-transparent text-sm text-black/80 placeholder:text-black/30 outline-none font-mono tracking-tight"
+                    />
+                    <button type="button" onClick={() => setShowKey((v) => !v)} className="text-[0.6rem] uppercase tracking-widest text-black/40 hover:text-black/70 font-semibold">
+                        {showKey ? 'Hide' : 'Show'}
+                    </button>
+                </div>
+                {!geminiKey && (
+                    <p className="text-xs text-amber-700/80">Enter your <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="underline hover:text-amber-900">Gemini API key</a> to enable live captions and TTS.</p>
+                )}
+                <div className="flex flex-wrap justify-center gap-3">
+                    <label className="flex items-center gap-2 rounded-full border border-black/10 bg-white/60 backdrop-blur-sm px-4 py-2 shadow-sm text-sm">
+                        <span className="text-[0.6rem] uppercase tracking-widest text-black/45 font-semibold whitespace-nowrap">Deaf person</span>
+                        <select value={deafLang} onChange={(e) => setDeafLang(e.target.value)} className="bg-transparent text-black/80 outline-none cursor-pointer text-sm">
+                            {LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+                        </select>
+                    </label>
+                    <label className="flex items-center gap-2 rounded-full border border-black/10 bg-white/60 backdrop-blur-sm px-4 py-2 shadow-sm text-sm">
+                        <span className="text-[0.6rem] uppercase tracking-widest text-black/45 font-semibold whitespace-nowrap">Hearing person</span>
+                        <select value={hearingLang} onChange={(e) => setHearingLang(e.target.value)} className="bg-transparent text-black/80 outline-none cursor-pointer text-sm">
+                            {LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+                        </select>
+                    </label>
+                </div>
                 <div className="flex justify-center">
                     {!isCameraActive ? (
                         <button onClick={startCamera} disabled={!isModelReady} className={`px-8 py-3 rounded-full font-bold text-sm tracking-widest uppercase shadow-lg transition-all duration-300 ${isModelReady ? 'bg-emerald-500 hover:bg-emerald-600 text-white hover:-translate-y-1' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}>
@@ -637,31 +817,39 @@ const Demo = () => {
             </div>
         </div>
         
+        <div className="w-full flex flex-col gap-8">
         <div className="w-full flex flex-col lg:flex-row gap-8 items-stretch">
             {/* Camera / Video Feed */}
-            <div className="w-full lg:w-2/3 glass-panel p-3 md:p-5 rounded-[2rem] relative flex justify-center items-center shadow-[0_8px_32px_-8px_rgba(0,0,0,0.05)] border-none">
-                <div className="absolute top-8 left-8 z-20 flex items-center gap-3">
+            <div className="w-full lg:w-3/5 glass-panel p-3 md:p-5 rounded-[2rem] relative flex justify-center items-center shadow-[0_8px_32px_-8px_rgba(0,0,0,0.05)] border-none">
+                <div className="absolute top-8 left-8 z-20 flex flex-wrap items-center gap-2">
                     <div className="px-4 py-1.5 rounded-full bg-black/40 backdrop-blur-md border border-white/20 text-white text-xs tracking-widest uppercase font-semibold flex items-center gap-2 shadow-xl">
-                        <span className={`w-2 h-2 rounded-full ${isCameraActive ? 'bg-emerald-400 animate-pulse' : 'bg-gray-400'}`}></span> {isCameraActive ? 'Camera Active' : 'Camera Off'}
+                        <span className={`w-2 h-2 rounded-full ${isCameraActive ? 'bg-emerald-400 animate-pulse' : 'bg-gray-400'}`}></span>{' '}
+                        {isCameraActive ? 'Camera on' : 'Camera off'}
                     </div>
+                    {isCameraActive && hasMicTrack && !experimentalWlasl && (
+                        <div className="px-4 py-1.5 rounded-full bg-sky-500/35 backdrop-blur-md border border-white/25 text-white text-[0.65rem] tracking-widest uppercase font-semibold flex items-center gap-2 shadow-xl">
+                            <span className={`w-2 h-2 rounded-full ${liveCaptionActive ? 'bg-amber-300 animate-pulse' : 'bg-sky-200'}`} />
+                            Live captions
+                        </div>
+                    )}
                 </div>
                 <div className="relative w-full rounded-2xl overflow-hidden bg-black/5 border border-black/5 aspect-[4/3] shadow-[inset_0_4px_24px_rgba(0,0,0,0.03)] flex items-center justify-center">
                     {!isCameraActive && <span className="text-black/30 font-medium tracking-wide">Waiting for camera feed...</span>}
-                    <video ref={videoRef} autoPlay playsInline className={`absolute inset-0 w-full h-full object-cover transform -scale-x-100 opacity-90 ${!isCameraActive ? 'hidden' : ''}`}></video>
+                    <video ref={videoRef} autoPlay playsInline muted className={`absolute inset-0 w-full h-full object-cover transform -scale-x-100 opacity-90 ${!isCameraActive ? 'hidden' : ''}`}></video>
                     <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover z-10 transform -scale-x-100"></canvas>
                 </div>
             </div>
             
             {/* Live Translation UI */}
-            <div className="w-full lg:w-1/3 glass-panel p-8 md:p-10 rounded-[2rem] flex flex-col shadow-[0_8px_32px_-8px_rgba(0,0,0,0.05)] border-none">
-                <h3 className="text-2xl font-semibold tracking-tight font-['Inter'] text-black/90 mb-4 pb-4 border-b border-black/5 flex justify-between items-center">
+            <div className="w-full lg:w-2/5 glass-panel p-6 md:p-8 rounded-[2rem] flex flex-col shadow-[0_8px_32px_-8px_rgba(0,0,0,0.05)] border-none min-h-0">
+                <h3 className="text-xl font-semibold tracking-tight font-['Inter'] text-black/90 mb-4 pb-4 border-b border-black/5 flex justify-between items-center gap-2">
                     Prediction
-                    <span className={`text-[0.65rem] uppercase tracking-widest font-semibold px-3 py-1 rounded-full border ${status.classes}`}>
+                    <span className={`text-[0.65rem] uppercase tracking-widest font-semibold px-3 py-1 rounded-full border shrink-0 ${status.classes}`}>
                         {status.text}
                     </span>
                 </h3>
                 
-                <div className="flex-grow flex flex-col justify-center items-center py-10">
+                <div className="flex-grow flex flex-col justify-center items-center py-6 md:py-8">
                     {apiOffline && isCameraActive && !experimentalWlasl && (
                         <p className="text-center text-xs text-amber-800 bg-amber-50 border border-amber-200/80 rounded-xl px-4 py-3 mb-6 max-w-sm leading-relaxed">
                             <span className="block font-semibold text-amber-900 mb-1">502 — classifier API is not running</span>
@@ -716,57 +904,110 @@ const Demo = () => {
                     )}
                 </div>
 
-                <div className="mt-auto w-full space-y-5">
+                <div className="mt-auto w-full space-y-4">
                     {experimentalWlasl ? (
                         <p className="text-center text-xs text-black/45 px-2">
-                            Fingerspelling, translation sequence, and voice slider are off while WLASL experimental mode is on.
+                            Fingerspelling, shared transcript, partner-speech captioning, and voice slider are off while WLASL experimental mode is on.
                         </p>
                     ) : (
-                        <>
-                            <div className="rounded-2xl border border-violet-200/60 bg-violet-50/40 px-4 py-3">
-                                <div className="flex justify-between items-center gap-3 mb-2">
-                                    <span className="text-[0.65rem] uppercase tracking-widest text-violet-900/70 font-bold">
-                                        Speak (Gemini TTS)
-                                    </span>
-                                    <span className="text-[0.65rem] font-mono text-violet-700/80 tabular-nums">
-                                        {speakLevel === 0 ? 'Off' : `${speakLevel}%`}
-                                    </span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min={0}
-                                    max={100}
-                                    value={speakLevel}
-                                    onChange={(e) => setSpeakLevel(Number(e.target.value))}
-                                    className="w-full h-2 rounded-full appearance-none cursor-pointer accent-violet-600 bg-violet-200/60"
-                                    aria-label="Speak aloud volume"
-                                />
-                                <p className="mt-2 text-[0.65rem] text-black/45 leading-snug">
-                                    With the slider on, each time you finish a word (a space is added—pause between words or end of a sign), only that word is sent to{' '}
-                                    <code className="font-mono text-[0.6rem]">gemini-2.5-flash-preview-tts</code> and spoken as a normal word, not letter-by-letter. Set{' '}
-                                    <code className="font-mono text-[0.6rem]">GEMINI_API_KEY</code>
-                                    . Without a key, the browser speaks the word instead.
-                                    {narrateSource === 'fallback' && speakLevel > 0 && (
-                                        <span className="block mt-1 text-amber-700/90">Using browser voice (add API key for Gemini TTS).</span>
-                                    )}
-                                </p>
+                        <div className="rounded-2xl border border-violet-200/60 bg-violet-50/40 px-4 py-3">
+                            <div className="flex justify-between items-center gap-3 mb-2">
+                                <span className="text-[0.65rem] uppercase tracking-widest text-violet-900/70 font-bold">
+                                    Speak signs aloud (Gemini TTS)
+                                </span>
+                                <span className="text-[0.65rem] font-mono text-violet-700/80 tabular-nums">
+                                    {speakLevel === 0 ? 'Off' : `${speakLevel}%`}
+                                </span>
                             </div>
-                            <h4 className="text-[0.65rem] uppercase tracking-widest text-black/40 font-bold mb-3 flex justify-between items-center">
-                                Translation Sequence
-                                <button onClick={() => setTranslationSequence(prev => prev.slice(0, -1))} className="bg-red-50 text-red-500 hover:bg-red-100 border border-red-200 px-3 py-1 rounded-full text-[0.60rem] transition-colors uppercase tracking-widest font-semibold flex items-center gap-1 shadow-sm">
-                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M3 12l6.414 6.414a2 2 0 001.414.586H19a2 2 0 002-2V7a2 2 0 00-2-2h-8.172a2 2 0 00-1.414.586L3 12z" /></svg>
-                                    BSPC
-                                </button>
-                            </h4>
-                            <div className="p-6 rounded-2xl bg-white/40 border border-white/60 shadow-[inset_0_2px_12px_rgba(0,0,0,0.03)] min-h-[120px] flex items-start">
-                                <p className="font-mono text-xl tracking-[0.2em] text-black/80 font-medium leading-relaxed uppercase whitespace-pre-wrap break-words w-full">
-                                    {translationSequence}<span className="text-emerald-500 -ml-1 animate-pulse">_</span>
-                                </p>
-                            </div>
-                        </>
+                            <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                value={speakLevel}
+                                onChange={(e) => setSpeakLevel(Number(e.target.value))}
+                                className="w-full h-2 rounded-full appearance-none cursor-pointer accent-violet-600 bg-violet-200/60"
+                                aria-label="Speak aloud volume"
+                            />
+                            <p className="mt-2 text-[0.65rem] text-black/45 leading-snug">
+                                When you finish a signed word (a space is inserted after a pause), that word can be spoken for your partner. Partner speech in the transcript is not re-read by TTS.
+                                {narrateSource === 'fallback' && speakLevel > 0 && (
+                                    <span className="block mt-1 text-amber-700/90">Using browser voice (add API key for Gemini TTS).</span>
+                                )}
+                            </p>
+                        </div>
                     )}
                 </div>
             </div>
+        </div>
+
+        {!experimentalWlasl && (
+            <section className="w-full glass-panel p-6 md:p-10 rounded-[2rem] shadow-[0_8px_32px_-8px_rgba(0,0,0,0.05)] border-none flex flex-col gap-6">
+                {captionApiHint && (
+                    <div className="rounded-xl border border-amber-200/90 bg-amber-50/90 px-4 py-3 text-left text-xs text-amber-950/90 leading-relaxed">
+                        {captionApiHint}
+                    </div>
+                )}
+
+                {/* Hearing person transcript */}
+                <div>
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                        <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-sky-400 shrink-0" />
+                            <h4 className="text-sm font-semibold font-['Inter'] text-black/80 tracking-tight">
+                                Hearing person
+                                <span className="ml-2 text-[0.6rem] uppercase tracking-widest text-black/40 font-semibold">{hearingLang}</span>
+                            </h4>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setHearingTranscript('')}
+                            disabled={!hearingTranscript}
+                            className="text-[0.6rem] uppercase tracking-widest font-semibold text-black/35 hover:text-red-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        >
+                            Clear
+                        </button>
+                    </div>
+                    <div className="min-h-[120px] rounded-2xl bg-sky-50/40 border border-sky-200/40 shadow-[inset_0_2px_12px_rgba(0,0,0,0.02)] p-5 md:p-6 overflow-y-auto">
+                        <p className="font-['Inter'] text-base md:text-lg text-black/80 font-normal leading-relaxed whitespace-pre-wrap break-words w-full">
+                            {hearingTranscript}
+                            {liveSpeechDraft ? (
+                                <span className="text-sky-600/70 italic">{liveSpeechDraft}</span>
+                            ) : null}
+                            {!hearingTranscript && !liveSpeechDraft && (
+                                <span className="text-black/25 italic">Speech from the hearing person appears here…</span>
+                            )}
+                        </p>
+                    </div>
+                </div>
+
+                {/* Deaf person transcript */}
+                <div>
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                        <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0" />
+                            <h4 className="text-sm font-semibold font-['Inter'] text-black/80 tracking-tight">
+                                Deaf person
+                                <span className="ml-2 text-[0.6rem] uppercase tracking-widest text-black/40 font-semibold">{deafLang}</span>
+                            </h4>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setTranslationSequence((prev) => prev.slice(0, -1))}
+                            className="shrink-0 bg-red-50 text-red-500 hover:bg-red-100 border border-red-200 px-3 py-1.5 rounded-full text-[0.6rem] transition-colors uppercase tracking-widest font-semibold flex items-center gap-1.5 shadow-sm"
+                        >
+                            <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M3 12l6.414 6.414a2 2 0 001.414.586H19a2 2 0 002-2V7a2 2 0 00-2-2h-8.172a2 2 0 00-1.414.586L3 12z" /></svg>
+                            Backspace
+                        </button>
+                    </div>
+                    <div className="min-h-[120px] rounded-2xl bg-emerald-50/40 border border-emerald-200/40 shadow-[inset_0_2px_12px_rgba(0,0,0,0.02)] p-5 md:p-6 overflow-y-auto">
+                        <p className="font-['Inter'] text-base md:text-lg text-black/80 font-normal leading-relaxed whitespace-pre-wrap break-words w-full">
+                            {translationSequence}
+                            <span className="text-emerald-600 font-light animate-pulse">▍</span>
+                        </p>
+                    </div>
+                </div>
+            </section>
+        )}
         </div>
     </main>
   );
