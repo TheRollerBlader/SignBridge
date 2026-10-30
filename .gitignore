@@ -48,6 +48,15 @@ pnpm-debug.log*
 !.env.example
 
 # ──────────────────────────────────────────────
+#  Media & Temporary Files
+# ──────────────────────────────────────────────
+*.mp4
+*.mov
+*.avi
+_temp_3d_frames/
+process_video.py
+
+# ──────────────────────────────────────────────
 #  Training data (large files — keep models tracked)
 # ──────────────────────────────────────────────
 Training/wlasl_*/
