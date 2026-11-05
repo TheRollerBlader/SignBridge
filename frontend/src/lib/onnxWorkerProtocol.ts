@@ -1,4 +1,4 @@
-import type { InferencePrediction, InferenceResult, OnnxSessionConfig } from './onnxInferenceTypes';
+import type { InferenceResult, OnnxSessionConfig } from './onnxInferenceTypes';
 
 /**
  * Worker Protocol Message Types and Contracts for Client-Side ONNX Web Workers.
