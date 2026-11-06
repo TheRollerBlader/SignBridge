@@ -12,7 +12,7 @@ export function buildLiveTranscribeWsUrl(): string {
   return `${proto}://${window.location.host}/api/ws/live-transcribe`;
 }
 
-function downsampleBuffer(buffer: Float32Array, sampleRate: number, outSampleRate: number): Float32Array {
+export function downsampleBuffer(buffer: Float32Array, sampleRate: number, outSampleRate: number): Float32Array {
   if (outSampleRate >= sampleRate) return buffer;
   const ratio = sampleRate / outSampleRate;
   const newLength = Math.round(buffer.length / ratio);
@@ -34,7 +34,7 @@ function downsampleBuffer(buffer: Float32Array, sampleRate: number, outSampleRat
   return result;
 }
 
-function floatTo16BitPCM(buffer: Float32Array): ArrayBuffer {
+export function floatTo16BitPCM(buffer: Float32Array): ArrayBuffer {
   const l = buffer.length;
   const out = new ArrayBuffer(l * 2);
   const view = new DataView(out);
@@ -62,7 +62,7 @@ export interface LiveCaptionHandle {
   dispose: () => void;
 }
 
-function isTrivial(s: string): boolean {
+export function isTrivial(s: string): boolean {
   const t = s.trim();
   return t === '' || /^[.\u2026,;:!?\-–—]+$/.test(t);
 }
