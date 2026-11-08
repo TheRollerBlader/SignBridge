@@ -10,15 +10,18 @@ jobs:
   test-and-build:
     name: Frontend Verification & Build
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Set up Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
@@ -27,10 +30,10 @@ jobs:
           cd frontend
           npm ci || npm install
 
+      - name: Typecheck and Build
+        run: |
+          npm --prefix frontend run build
+
       - name: Run Vitest test suite
         run: |
           npm --prefix frontend test -- --run
-
-      - name: Build frontend distribution
-        run: |
-          npm --prefix frontend run build
