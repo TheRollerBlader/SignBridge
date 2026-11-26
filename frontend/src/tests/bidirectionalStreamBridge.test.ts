@@ -81,4 +81,87 @@ describe('BidirectionalStreamBridge', () => {
     bridge.clearDialogue();
     expect(bridge.getMessages()).toHaveLength(0);
   });
+
+  it('connects over WebSocket, ingests transcript/sign frames, sends PCM, and reconnects on drop', () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: Array<{
+        url: string;
+        readyState: number;
+        sent: unknown[];
+        onopen: ((ev: unknown) => void) | null;
+        onmessage: ((ev: { data: unknown }) => void) | null;
+        onerror: ((ev: unknown) => void) | null;
+        onclose: ((ev: unknown) => void) | null;
+        send: (data: unknown) => void;
+        close: () => void;
+      }> = [];
+
+      const bridge = new BidirectionalStreamBridge({
+        wsEndpoint: 'ws://localhost:8000/ws/live-transcribe',
+        baseBackoffMs: 250,
+        maxBackoffMs: 1000,
+        reconnectAttempts: 2,
+        heartbeatIntervalMs: 5000,
+      });
+
+      bridge.connect((url) => {
+        const sock = {
+          url,
+          readyState: 1,
+          sent: [] as unknown[],
+          onopen: null as ((ev: unknown) => void) | null,
+          onmessage: null as ((ev: { data: unknown }) => void) | null,
+          onerror: null as ((ev: unknown) => void) | null,
+          onclose: null as ((ev: unknown) => void) | null,
+          send(data: unknown) {
+            this.sent.push(data);
+          },
+          close() {
+            this.readyState = 3;
+          },
+        };
+        sockets.push(sock);
+        return sock;
+      });
+
+      expect(bridge.getStatus()).toBe('connecting');
+      expect(sockets).toHaveLength(1);
+
+      sockets[0].onopen?.({});
+      expect(bridge.getStatus()).toBe('connected');
+
+      // Ingest incoming transcript & sign payloads
+      sockets[0].onmessage?.({
+        data: JSON.stringify({ type: 'transcript', id: 't1', text: 'Where is the gate?', is_final: true, confidence: 0.94 }),
+      });
+      sockets[0].onmessage?.({
+        data: JSON.stringify({ type: 'sign', id: 'g1', text: 'GATE B4', gloss: ['GATE', 'B4'], isFinal: true, confidence: 0.91 }),
+      });
+
+      expect(bridge.getMessages()).toHaveLength(2);
+      expect(bridge.getMessages()[0].participant).toBe('speaker');
+      expect(bridge.getMessages()[1].rawGloss).toEqual(['GATE', 'B4']);
+
+      // Send PCM and sign event
+      expect(bridge.sendAudioFrame(new Uint8Array([1, 2, 3, 4]))).toBe(true);
+      expect(bridge.sendSignEvent('HELLO', 0.98, ['HELLO'])).toBe(true);
+      expect(sockets[0].sent).toHaveLength(2);
+
+      // Heartbeat fires
+      vi.advanceTimersByTime(5000);
+      expect(sockets[0].sent).toHaveLength(3);
+
+      // Unexpected drop triggers exponential backoff reconnect
+      sockets[0].onclose?.({});
+      expect(bridge.getStatus()).toBe('reconnecting');
+      vi.advanceTimersByTime(500);
+      expect(sockets).toHaveLength(2);
+
+      bridge.disconnect();
+      expect(bridge.getStatus()).toBe('disconnected');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
