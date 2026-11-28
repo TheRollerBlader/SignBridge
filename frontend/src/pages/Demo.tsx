@@ -62,6 +62,38 @@ const LANGUAGES = [
   'Dutch', 'Turkish', 'Polish', 'Vietnamese', 'Thai', 'Indonesian',
 ] as const;
 
+interface LandmarkPoint {
+  x: number;
+  y: number;
+  z: number;
+  visibility?: number;
+}
+
+interface HandLandmarkerResult {
+  landmarks?: LandmarkPoint[][];
+  handednesses?: { categoryName?: string; displayName?: string }[][];
+}
+
+interface HandLandmarkerInstance {
+  detectForVideo(video: HTMLVideoElement, timestampMs: number): HandLandmarkerResult;
+}
+
+interface PoseLandmarkerInstance {
+  detectForVideo(video: HTMLVideoElement, timestampMs: number): { landmarks?: LandmarkPoint[][] };
+}
+
+interface DrawingUtilsInstance {
+  drawConnectors(
+    landmarks: LandmarkPoint[],
+    connections: { start: number; end: number }[],
+    options: { color: string; lineWidth: number }
+  ): void;
+  drawLandmarks(
+    landmarks: LandmarkPoint[],
+    options: { color: string; lineWidth: number; radius: number }
+  ): void;
+}
+
 const Demo = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -93,8 +125,8 @@ const Demo = () => {
 
   const streamRef = useRef<MediaStream | null>(null);
   const animationFrameIdRef = useRef<number | null>(null);
-  const handLandmarkerRef = useRef<any>(null);
-  const drawingUtilsRef = useRef<any>(null);
+  const handLandmarkerRef = useRef<HandLandmarkerInstance | null>(null);
+  const drawingUtilsRef = useRef<DrawingUtilsInstance | null>(null);
   const lastVideoTimeRef = useRef(-1);
   const lastPredictionRef = useRef<string | null>(null);
   const consecutivePredictionsRef = useRef<number>(0);
@@ -108,7 +140,7 @@ const Demo = () => {
   const lastSpokenTrimmedRef = useRef<string | null>(null);
   const speakLevelRef = useRef(0);
   const narrateAudioRef = useRef<HTMLAudioElement | null>(null);
-  const poseLandmarkerRef = useRef<any>(null);
+  const poseLandmarkerRef = useRef<PoseLandmarkerInstance | null>(null);
   const experimentalWlaslRef = useRef(false);
   const wlaslFrameBufferRef = useRef<number[][]>([]);
   const lastWlaslFetchRef = useRef(0);
@@ -166,7 +198,7 @@ const Demo = () => {
       setWlaslPoseReady(false);
       try {
         const { PoseLandmarker, FilesetResolver } = await import(
-          // @ts-ignore CDN ESM (same bundle as HandLandmarker)
+          // @ts-expect-error CDN ESM (same bundle as HandLandmarker)
           'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs'
         );
         const filesetResolver = await FilesetResolver.forVisionTasks(
@@ -188,9 +220,9 @@ const Demo = () => {
           poseLandmarkerRef.current = pose;
           setWlaslPoseReady(true);
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (!cancelled) {
-          setWlaslError(e?.message ?? 'Pose model failed to load');
+          setWlaslError(e instanceof Error ? e.message : 'Pose model failed to load');
           setWlaslPoseReady(false);
         }
       }
@@ -448,7 +480,7 @@ const Demo = () => {
       try {
         setStatus({ text: 'Loading Model...', classes: 'bg-yellow-50 text-yellow-600 border-yellow-100' });
         
-        // @ts-ignore
+        // @ts-expect-error CDN ESM import for MediaPipe Tasks Vision
         const { HandLandmarker, FilesetResolver, DrawingUtils } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs");
 
         const filesetResolver = await FilesetResolver.forVisionTasks(
@@ -477,9 +509,10 @@ const Demo = () => {
 
         setIsModelReady(true);
         setStatus({ text: 'Model Ready (Camera Off)', classes: 'bg-blue-50 text-blue-600 border-blue-100' });
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (!isCancelled) {
-          setStatus({ text: `Error: ${err.message}`, classes: 'bg-red-100 text-red-700 border-red-200' });
+          const msg = err instanceof Error ? err.message : String(err);
+          setStatus({ text: `Error: ${msg}`, classes: 'bg-red-100 text-red-700 border-red-200' });
           console.error(err);
         }
       }
@@ -714,12 +747,13 @@ const Demo = () => {
           detect();
         };
       }
-    } catch (err: any) {
-      setStatus({ text: `Camera Error: ${err.message}`, classes: 'bg-red-100 text-red-700 border-red-200' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus({ text: `Camera Error: ${msg}`, classes: 'bg-red-100 text-red-700 border-red-200' });
     }
   };
 
-  const stopCamera = () => {
+  const stopCamera = useCallback(() => {
     if (animationFrameIdRef.current) {
         cancelAnimationFrame(animationFrameIdRef.current);
     }
@@ -739,14 +773,14 @@ const Demo = () => {
     if (ctx && canvasRef.current) {
         ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
-  };
+  }, []);
 
   // Clean up on unmount
   useEffect(() => {
     return () => {
       stopCamera();
     };
-  }, []);
+  }, [stopCamera]);
 
   return (
     <main className="flex-grow flex flex-col items-center px-6 pt-10 pb-20 w-full max-w-7xl mx-auto animate-spring-up">

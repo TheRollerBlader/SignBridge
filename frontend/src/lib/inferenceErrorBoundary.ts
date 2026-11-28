@@ -164,6 +164,7 @@ export function determineRecoveryStrategy(
 
     default: {
       const _exhaustiveCheck: never = event.category;
+      void _exhaustiveCheck;
       return {
         strategy: 'DEGRADE_TO_HEURISTICS',
         shouldAlertUser: true,

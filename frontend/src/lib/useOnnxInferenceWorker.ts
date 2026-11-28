@@ -32,23 +32,21 @@ export function useOnnxInferenceWorker({
   onPrediction,
   onError
 }: UseOnnxWorkerOptions): UseOnnxWorkerReturn {
-  const [status, setStatus] = useState<WorkerLifecycleStatus>('idle');
+  const [status, setStatus] = useState<WorkerLifecycleStatus>(() =>
+    workerFactory && typeof window !== 'undefined' ? 'initializing' : 'idle'
+  );
   const [latestResult, setLatestResult] = useState<InferenceResult | null>(null);
   const [error, setError] = useState<Error | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
   const isBusyRef = useRef<boolean>(false);
 
-  const initWorker = useCallback(() => {
+  const attachWorker = useCallback((): Error | null => {
     if (!workerFactory || typeof window === 'undefined') {
-      setStatus('idle');
-      return;
+      return null;
     }
 
     try {
-      setStatus('initializing');
-      setError(null);
-
       const worker = workerFactory();
       workerRef.current = worker;
 
@@ -88,16 +86,22 @@ export function useOnnxInferenceWorker({
         type: 'INIT_SESSION',
         payload: { config }
       });
+      return null;
     } catch (err) {
-      setStatus('error');
       const errObj = err instanceof Error ? err : new Error(String(err));
-      setError(errObj);
       onError?.(errObj);
+      return errObj;
     }
   }, [config, workerFactory, onPrediction, onError]);
 
   useEffect(() => {
-    initWorker();
+    const mountErr = attachWorker();
+    if (mountErr) {
+      queueMicrotask(() => {
+        setStatus('error');
+        setError(mountErr);
+      });
+    }
 
     return () => {
       if (workerRef.current) {
@@ -107,7 +111,7 @@ export function useOnnxInferenceWorker({
       }
       setStatus('terminated');
     };
-  }, [initWorker]);
+  }, [attachWorker]);
 
   const dispatchFrame = useCallback(
     (landmarksTensor: Float32Array, frameId: number): boolean => {
@@ -133,8 +137,18 @@ export function useOnnxInferenceWorker({
       workerRef.current.terminate();
       workerRef.current = null;
     }
-    initWorker();
-  }, [initWorker]);
+    if (!workerFactory || typeof window === 'undefined') {
+      setStatus('idle');
+      return;
+    }
+    setStatus('initializing');
+    setError(null);
+    const err = attachWorker();
+    if (err) {
+      setStatus('error');
+      setError(err);
+    }
+  }, [attachWorker, workerFactory]);
 
   return {
     status,

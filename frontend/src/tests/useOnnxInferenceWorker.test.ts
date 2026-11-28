@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { useOnnxInferenceWorker } from '../lib/useOnnxInferenceWorker';
 import type { InferenceResult, OnnxSessionConfig } from '../lib/onnxInferenceTypes';
 
@@ -202,7 +202,7 @@ describe('useOnnxInferenceWorker', () => {
     expect(onError).toHaveBeenCalledTimes(2);
   });
 
-  it('handles workerFactory instantiation exceptions gracefully', () => {
+  it('handles workerFactory instantiation exceptions gracefully', async () => {
     const onError = vi.fn();
     const failingFactory = () => {
       throw new Error('Workers blocked by CSP');
@@ -216,7 +216,9 @@ describe('useOnnxInferenceWorker', () => {
       })
     );
 
-    expect(result.current.status).toBe('error');
+    await waitFor(() => {
+      expect(result.current.status).toBe('error');
+    });
     expect(result.current.error?.message).toBe('Workers blocked by CSP');
     expect(onError).toHaveBeenCalledTimes(1);
   });

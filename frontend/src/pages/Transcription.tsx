@@ -72,7 +72,7 @@ const Transcription = () => {
       stopAll();
       setListening(false);
     }
-  }, [stopAll]);
+  }, [geminiKey, stopAll]);
 
   const stopListening = useCallback(() => {
     stopAll();
